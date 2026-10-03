@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: faas-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: faas_user
+      POSTGRES_PASSWORD: faas_password
+      POSTGRES_DB: faas_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U faas_user -d faas_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  registry:
+    image: registry:2
+    container_name: faas-registry
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes:
+      - registry_data:/var/lib/registry
+
+volumes:
+  postgres_data:
+  registry_data:
