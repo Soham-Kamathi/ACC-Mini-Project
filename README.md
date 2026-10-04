@@ -1,5 +1,3 @@
-cd
-
 # Kubernetes-Based Docker Serverless (FaaS) Function Execution Platform
 
 A self-hosted **Function-as-a-Service (FaaS)** execution platform that allows developers to register, version, manage, and invoke serverless functions on demand. The platform packages user code into standardized Docker containers, orchestrates them via a custom **FaaS Controller** on **Kubernetes**, supports **scale-to-zero** with cold/warm latency measurement, enforces resource & security constraints, and exposes monitoring and management through an interactive **Web Dashboard** and **Prometheus/Grafana**.
@@ -57,6 +55,12 @@ ACC Mini Project/
 
 ---
 
+## Security & Isolation Model
+
+- **Authentication on invoke**: `POST /api/v1/invoke/{name}[/{version}]` requires a `Bearer` JWT. Functions are looked up by `(owner, name)`, so two users can both own a function called `hello` without colliding.
+- **Per-version Deployments**: each function version is deployed as its own Deployment/Service named `fn-<owner_id>-<name>-<version>` (all labelled `faas-function=<owner_id>-<name>`). `/invoke/{name}/v1` really runs v1; `/invoke/{name}` runs the newest version that has finished building. Function names must be DNS-1123 labels (max 30 chars).
+- **No in-process execution by default**: user code only ever runs inside a Pod. The old `exec()` fallback is disabled; set `ALLOW_LOCAL_SANDBOX=true` for local development without a cluster (**unsafe: arbitrary code execution inside the API process**). Every invocation response and log row carries `executed_on` (`k8s`, `sandbox` or `none`).
+
 ## Quick Start Guide
 
 ### 1. Enable Kubernetes on Docker Desktop
@@ -105,7 +109,7 @@ npm run dev
 ### Running Unit & Integration Tests
 
 ```bash
-python -m pytest backend/tests -v
+python -m pytest backend/tests -v   # use the project venv: .venv\Scripts\python.exe -m pytest backend/tests -v
 ```
 
 ### Experiment 1: Cold Start vs. Warm Start Latency
@@ -127,6 +131,8 @@ python benchmarks/concurrency_test.py
 ---
 
 ## Benchmark Results & Empirical Evaluation
+
+> **Note:** the results below were collected before the sandbox fallback was gated and `executed_on` was recorded, so some calls may have run in-process rather than in a Pod. Re-run `benchmarks/cold_start_test.py` and `benchmarks/concurrency_test.py` (they now abort if any call did not run on Kubernetes) and replace these numbers.
 
 ### 1. Unit & Integration Test Suite Verification
 

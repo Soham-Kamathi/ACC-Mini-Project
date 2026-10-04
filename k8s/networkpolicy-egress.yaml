@@ -1,0 +1,38 @@
+# Egress isolation for function Pods (namespace faas-fn).
+#
+# A function may call the public internet (and resolve DNS), but it cannot reach any private address:
+# other function Pods, Services, the Kubernetes API server, the in-cluster registry, the node, or the
+# cloud metadata endpoint (169.254.169.254). Safe to apply in every deployment mode.
+#
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, ...). Docker Desktop's built-in
+# Kubernetes does not, so the object is accepted there but has no effect.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: faas-restrict-egress
+  namespace: faas-fn
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Public internet only: everything except private / link-local / CGNAT ranges
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10

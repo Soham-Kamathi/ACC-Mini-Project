@@ -1,0 +1,33 @@
+# Ingress isolation for function Pods (namespace faas-fn).
+#
+# Default-deny all ingress, then allow TCP 8080 only from the FaaS controller namespace (faas-system).
+# Function Pods therefore cannot be reached by each other or by anything else in the cluster.
+#
+# Use this when the backend runs inside the cluster (K8S_IN_CLUSTER=true, in namespace faas-system).
+# When the backend runs outside the cluster (local development), invocations arrive through the
+# Kubernetes API server proxy, whose source address depends on the CNI; apply only
+# networkpolicy-egress.yaml in that mode, or add an ipBlock rule for your API server / node address.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: faas-default-deny-ingress
+  namespace: faas-fn
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: faas-allow-ingress-from-controller
+  namespace: faas-fn
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: faas-system
+      ports:
+        - { protocol: TCP, port: 8080 }

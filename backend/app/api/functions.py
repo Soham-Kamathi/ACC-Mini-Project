@@ -9,11 +9,16 @@ from backend.app.schemas.function import FunctionCreate, FunctionUpdate, Functio
 from backend.app.services.builder import builder_service
 from backend.app.services.k8s_client import k8s_service
 from backend.app.api.invoke import invalidate_fn_cache
-from backend.app.services.router import invalidate_router_cache
+from backend.app.services.router import invalidate_router_cache, mark_warm, mark_cold
+from backend.app.services.naming import function_key, resource_name
+from backend.app.core.config import settings
+
+def _image_tag(username: str, function_name: str, version_tag: str) -> str:
+    return f"{settings.DOCKER_REGISTRY}/{username}/{function_name}:{version_tag}".lower()
 
 router = APIRouter(prefix="/functions", tags=["Functions"])
 
-def _build_and_deploy_task(function_id: int, username: str, function_name: str, version_tag: str, code: str, requirements: str, runtime: str, memory_limit: str, cpu_limit: str):
+def _build_and_deploy_task(function_id: int, owner_id: int, username: str, function_name: str, version_tag: str, code: str, requirements: str, runtime: str, memory_limit: str, cpu_limit: str, timeout_seconds: int = 10):
     """Background task for image build and Kubernetes deployment."""
     from backend.app.core.db import SessionLocal
     db = SessionLocal()
@@ -38,23 +43,46 @@ def _build_and_deploy_task(function_id: int, username: str, function_name: str, 
 
         # 2. Deploy to Kubernetes
         k8s_service.deploy_function(
-            function_name=function_name,
+            resource=resource_name(owner_id, function_name, version_tag),
+            function_key=function_key(owner_id, function_name),
+            version_tag=version_tag,
             image_tag=image_tag,
             memory_limit=memory_limit,
             cpu_limit=cpu_limit,
-            initial_replicas=1
+            initial_replicas=1,
+            timeout_seconds=timeout_seconds
         )
 
+        # Don't declare the version ready until a Pod is actually serving it
+        resource = resource_name(owner_id, function_name, version_tag)
+        if not k8s_service.wait_for_ready_pod(resource, 120):
+            raise RuntimeError("Pod did not become ready within 120s (image pull or crash loop?)")
+
+        # The version only becomes routable once its Deployment exists
+        version = db.query(FunctionVersion).filter(
+            FunctionVersion.function_id == function_id,
+            FunctionVersion.version_tag == version_tag
+        ).first()
+        if version:
+            version.is_active = True
         fn.status = "READY"
         fn.active_replicas = 1
-        fn.status_message = "Function is deployed and ready for invocations."
+        fn.status_message = f"Version {version_tag} is deployed and ready for invocations."
         db.commit()
+        mark_warm(function_id, version_tag)  # deployed with 1 replica
+        invalidate_router_cache(function_id)
     except Exception as e:
         print(f"[Build Error] Failed to build/deploy {function_name}: {e}")
         fn = db.query(Function).filter(Function.id == function_id).first()
         if fn:
-            fn.status = "ERROR"
-            fn.status_message = f"Build/Deploy failed: {str(e)}"
+            has_ready_version = db.query(FunctionVersion).filter(
+                FunctionVersion.function_id == function_id,
+                FunctionVersion.is_active.is_(True)
+            ).count() > 0
+            # An older ready version keeps serving, so only flag ERROR when nothing is routable
+            if not has_ready_version:
+                fn.status = "ERROR"
+            fn.status_message = f"Build/Deploy of {version_tag} failed: {str(e)}"
             db.commit()
     finally:
         db.close()
@@ -96,14 +124,14 @@ def create_function(
 
     # Initial Version
     version_tag = "v1"
-    image_tag = f"localhost:5000/{user.username}/{new_fn.name}:{version_tag}"
+    image_tag = _image_tag(user.username, new_fn.name, version_tag)
     new_version = FunctionVersion(
         function_id=new_fn.id,
         version_tag=version_tag,
         code=func_in.code,
         requirements=func_in.requirements or "",
         image_tag=image_tag,
-        is_active=True
+        is_active=False  # becomes active once built and deployed
     )
     db.add(new_version)
     db.commit()
@@ -112,6 +140,7 @@ def create_function(
     background_tasks.add_task(
         _build_and_deploy_task,
         function_id=new_fn.id,
+        owner_id=user_id,
         username=user.username,
         function_name=new_fn.name,
         version_tag=version_tag,
@@ -119,10 +148,11 @@ def create_function(
         requirements=func_in.requirements or "",
         runtime=new_fn.runtime,
         memory_limit=new_fn.memory_limit,
-        cpu_limit=new_fn.cpu_limit
+        cpu_limit=new_fn.cpu_limit,
+        timeout_seconds=new_fn.timeout_seconds
     )
 
-    invalidate_fn_cache(new_fn.name)
+    invalidate_fn_cache(user_id, new_fn.name)
     invalidate_router_cache(new_fn.id)
 
     return FunctionOut.model_validate(new_fn)
@@ -173,9 +203,16 @@ def update_function(
 
     # If code changed, create a new version
     if func_update.code is not None:
-        latest_version = db.query(FunctionVersion).filter(FunctionVersion.function_id == fn.id).count()
-        new_version_tag = func_update.version_tag or f"v{latest_version + 1}"
-        image_tag = f"localhost:5000/{user.username}/{fn.name}:{new_version_tag}"
+        existing_tags = [t for (t,) in db.query(FunctionVersion.version_tag).filter(FunctionVersion.function_id == fn.id).all()]
+        if func_update.version_tag:
+            new_version_tag = func_update.version_tag
+            if new_version_tag in existing_tags:
+                raise HTTPException(status_code=400, detail=f"Version '{new_version_tag}' already exists for '{name}'.")
+        else:
+            # max+1, not count+1: counting would reuse a tag after a version is removed
+            numbered = [int(t[1:]) for t in existing_tags if t.startswith("v") and t[1:].isdigit()]
+            new_version_tag = f"v{max(numbered, default=0) + 1}"
+        image_tag = _image_tag(user.username, fn.name, new_version_tag)
 
         new_version = FunctionVersion(
             function_id=fn.id,
@@ -183,7 +220,7 @@ def update_function(
             code=func_update.code,
             requirements=func_update.requirements or "",
             image_tag=image_tag,
-            is_active=True
+            is_active=False  # becomes active once built and deployed; older versions keep serving meanwhile
         )
         db.add(new_version)
         db.commit()
@@ -191,6 +228,7 @@ def update_function(
         background_tasks.add_task(
             _build_and_deploy_task,
             function_id=fn.id,
+            owner_id=user_id,
             username=user.username,
             function_name=fn.name,
             version_tag=new_version_tag,
@@ -198,13 +236,14 @@ def update_function(
             requirements=func_update.requirements or "",
             runtime=fn.runtime,
             memory_limit=fn.memory_limit,
-            cpu_limit=fn.cpu_limit
+            cpu_limit=fn.cpu_limit,
+            timeout_seconds=fn.timeout_seconds
         )
 
     db.commit()
     db.refresh(fn)
 
-    invalidate_fn_cache(fn.name)
+    invalidate_fn_cache(user_id, fn.name)
     invalidate_router_cache(fn.id)
 
     return FunctionDetailOut.model_validate(fn)
@@ -220,10 +259,11 @@ def delete_function(
         raise HTTPException(status_code=404, detail=f"Function '{name}' not found.")
 
     # 1. Clean up Kubernetes deployment & service
-    k8s_service.delete_function(name)
+    k8s_service.delete_function(function_key(user_id, name))
 
-    invalidate_fn_cache(name)
+    invalidate_fn_cache(user_id, name)
     invalidate_router_cache(fn.id)
+    mark_cold(fn.id)
 
     # 2. Delete database records
     db.delete(fn)

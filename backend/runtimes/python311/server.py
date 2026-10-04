@@ -33,6 +33,12 @@ def load_user_handler():
 
 load_user_handler()
 
+class _NoWaitExecutor(concurrent.futures.ThreadPoolExecutor):
+    """The stock executor's __exit__ joins the worker, which would make a timed-out handler block the response."""
+    def __exit__(self, *exc):
+        self.shutdown(wait=False)
+        return False
+
 class FunctionRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/healthz" or self.path == "/health":
@@ -73,7 +79,7 @@ class FunctionRequestHandler(BaseHTTPRequestHandler):
             start_time = time.perf_counter()
             
             # Execute with timeout in thread pool
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            with _NoWaitExecutor(max_workers=1) as executor:
                 import inspect
                 try:
                     sig = inspect.signature(user_handler)

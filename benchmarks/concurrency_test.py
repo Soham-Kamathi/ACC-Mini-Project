@@ -2,30 +2,32 @@ import asyncio
 import time
 import httpx
 import statistics
+from common import BASE_URL, register_user, create_function, wait_for_status, require_k8s
 
-BASE_URL = "http://127.0.0.1:8000/api/v1"
-
-async def send_request(client: httpx.AsyncClient, function_name: str, payload: dict):
+async def send_request(client: httpx.AsyncClient, function_name: str, payload: dict, headers: dict):
     t0 = time.perf_counter()
     try:
-        resp = await client.post(f"{BASE_URL}/invoke/{function_name}", json=payload)
+        resp = await client.post(f"{BASE_URL}/invoke/{function_name}", json=payload, headers=headers)
         latency_ms = (time.perf_counter() - t0) * 1000.0
-        return {"success": resp.status_code == 200, "latency_ms": latency_ms, "status": resp.status_code}
+        body = resp.json() if resp.status_code == 200 else {}
+        ok = resp.status_code == 200 and body.get("status_code") == 200
+        return {"success": ok, "latency_ms": latency_ms, "status": resp.status_code, "executed_on": body.get("executed_on")}
     except Exception as e:
         latency_ms = (time.perf_counter() - t0) * 1000.0
         return {"success": False, "latency_ms": latency_ms, "error": str(e)}
 
-async def run_concurrency_tier(function_name: str, concurrency_level: int):
+async def run_concurrency_tier(function_name: str, concurrency_level: int, headers: dict):
     print(f"\n---> Testing Concurrency Level: {concurrency_level} simultaneous requests...")
     payload = {"x": 42}
 
     limits = httpx.Limits(max_connections=200, max_keepalive_connections=50)
     async with httpx.AsyncClient(timeout=30.0, limits=limits) as client:
         start_time = time.perf_counter()
-        tasks = [send_request(client, function_name, payload) for _ in range(concurrency_level)]
+        tasks = [send_request(client, function_name, payload, headers) for _ in range(concurrency_level)]
         results = await asyncio.gather(*tasks)
         total_time_s = time.perf_counter() - start_time
 
+    require_k8s([r.get("executed_on") for r in results if r["success"]])
     latencies = [r["latency_ms"] for r in results if r["success"]]
     success_count = sum(1 for r in results if r["success"])
     error_count = concurrency_level - success_count
@@ -49,8 +51,11 @@ async def main():
     print("=" * 60)
     
     function_name = "bench-calc"
+    headers = register_user("concuser")
+    create_function(headers, function_name)
+    wait_for_status(headers, function_name, {"READY", "RUNNING"})
     for tier in [1, 10, 50, 100]:
-        await run_concurrency_tier(function_name, tier)
+        await run_concurrency_tier(function_name, tier, headers)
         await asyncio.sleep(1)
 
 if __name__ == "__main__":

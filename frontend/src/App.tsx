@@ -1,16 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import ApiAccessPanel from './ApiAccessPanel';
 import { 
   Server, Play, Plus, RefreshCw, Trash2, Clock, Cpu, 
   Database, Activity, Zap, CheckCircle2, AlertCircle, 
   Terminal, BarChart3, Code2, Layers, ShieldCheck, Box
 } from 'lucide-react';
 
-const API_BASE = '/api/v1';
+const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
 
 interface FunctionItem {
   id: number;
   name: string;
+  public_id: string;
   runtime: string;
   description: string;
   status: string;
@@ -142,6 +144,8 @@ export default function App() {
   const [invokePayload, setInvokePayload] = useState('{\n  "n": 25\n}');
   const [invokeResult, setInvokeResult] = useState<any>(null);
   const [invoking, setInvoking] = useState(false);
+  const selectedFnRef = useRef<string>('');
+  selectedFnRef.current = selectedFn;
 
   // Setup Axios Header
   const getHeaders = () => ({
@@ -224,8 +228,9 @@ export default function App() {
       setStats(statsRes.data || null);
       setLogs(logsRes.data || []);
       setClusterStatus(clusterRes.data || null);
-      if (fnRes.data?.length > 0 && !selectedFn) {
+      if (fnRes.data?.length > 0 && !selectedFnRef.current) {
         const firstFn = fnRes.data[0].name;
+        selectedFnRef.current = firstFn;
         setSelectedFn(firstFn);
         setInvokePayload(getSamplePayload(firstFn));
       }
@@ -305,7 +310,7 @@ export default function App() {
           }
         }
       }
-      const resp = await axios.post(`${API_BASE}/invoke/${selectedFn}`, parsedPayload);
+      const resp = await axios.post(`${API_BASE}/invoke/${selectedFn}`, parsedPayload, getHeaders());
       setInvokeResult(resp.data);
       fetchData();
     } catch (err: any) {
@@ -627,6 +632,7 @@ export default function App() {
                     <div className="flex items-center justify-between pt-3 border-t border-slate-800/80">
                       <button
                         onClick={() => {
+                          selectedFnRef.current = fn.name;
                           setSelectedFn(fn.name);
                           setInvokePayload(getSamplePayload(fn.name));
                           setActiveTab('invoke');
@@ -788,6 +794,7 @@ export default function App() {
                   value={selectedFn}
                   onChange={(e) => {
                     const fnName = e.target.value;
+                    selectedFnRef.current = fnName;
                     setSelectedFn(fnName);
                     setInvokePayload(getSamplePayload(fnName));
                   }}
@@ -931,6 +938,14 @@ export default function App() {
               )}
             </div>
           </div>
+        )}
+
+        {activeTab === 'invoke' && selectedFn && (
+          <ApiAccessPanel
+            fnName={selectedFn}
+            publicId={functions.find(f => f.name === selectedFn)?.public_id}
+            token={token}
+          />
         )}
 
         {/* Tab 4: Logs */}

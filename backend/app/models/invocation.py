@@ -16,6 +16,9 @@ class InvocationLog(Base):
     execution_duration_ms = Column(Float, default=0.0)
     total_duration_ms = Column(Float, default=0.0)
     
+    # Where the call really ran: "k8s", "sandbox" (in-process exec) or "none" (not executed)
+    executed_on = Column(String(16), default="unknown")
+
     status_code = Column(Integer, default=200)
     payload_input = Column(Text, default="")
     payload_output = Column(Text, default="")

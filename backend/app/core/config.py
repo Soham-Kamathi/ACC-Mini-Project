@@ -31,4 +31,13 @@ class Settings(BaseSettings):
     DEFAULT_CPU_LIMIT: str = "500m"
     DEFAULT_TIMEOUT_SECONDS: int = 10
 
+    # Runs user code with exec() inside the API process when Kubernetes is unavailable.
+    # UNSAFE (arbitrary code execution on the host) - only enable for local development/tests.
+    # Public (API key) invocation limits
+    API_KEY_RATE_LIMIT_PER_MINUTE: int = int(os.getenv("API_KEY_RATE_LIMIT_PER_MINUTE", "120"))
+    MAX_PAYLOAD_BYTES: int = int(os.getenv("MAX_PAYLOAD_BYTES", str(1024 * 1024)))
+    MAX_API_KEYS_PER_FUNCTION: int = 10
+
+    ALLOW_LOCAL_SANDBOX: bool = os.getenv("ALLOW_LOCAL_SANDBOX", "false").lower() == "true"
+
 settings = Settings()

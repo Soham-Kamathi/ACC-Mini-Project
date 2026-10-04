@@ -28,7 +28,7 @@ def test_function_invocation():
     })
 
     # Invoke Function
-    inv_resp = client.post("/api/v1/invoke/multiplier", json={"a": 6, "b": 7})
+    inv_resp = client.post("/api/v1/invoke/multiplier", headers=headers, json={"a": 6, "b": 7})
     assert inv_resp.status_code == 200
     data = inv_resp.json()
     assert data["status_code"] == 200
@@ -36,6 +36,7 @@ def test_function_invocation():
     assert "cold_start_duration_ms" in data
     assert "execution_duration_ms" in data
     assert "total_duration_ms" in data
+    assert data["executed_on"] == "sandbox"
 
     # Check metrics
     metrics_resp = client.get("/api/v1/metrics")

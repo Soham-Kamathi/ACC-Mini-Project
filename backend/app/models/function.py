@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
@@ -8,6 +9,8 @@ class Function(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(64), index=True, nullable=False)
+    # Stable, unguessable id used in the public endpoint /api/v1/f/{public_id}
+    public_id = Column(String(32), unique=True, index=True, nullable=False, default=lambda: uuid.uuid4().hex[:16])
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     runtime = Column(String(32), default="python311", nullable=False)
     description = Column(String(256), default="")
@@ -30,6 +33,7 @@ class Function(Base):
     owner = relationship("User", back_populates="functions")
     versions = relationship("FunctionVersion", back_populates="function", cascade="all, delete-orphan")
     invocations = relationship("InvocationLog", back_populates="function", cascade="all, delete-orphan")
+    api_keys = relationship("ApiKey", back_populates="function", cascade="all, delete-orphan")
 
 class FunctionVersion(Base):
     __tablename__ = "function_versions"

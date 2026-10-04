@@ -1,3 +1,4 @@
+import json
 import time
 from typing import Optional, Dict, Any, List
 from kubernetes import client, config
@@ -42,22 +43,24 @@ class K8sService:
         except Exception as e:
             print(f"[K8sService Error] Failed ensuring namespace {namespace}: {e}")
 
-    def deploy_function(self, function_name: str, image_tag: str, memory_limit: str = "256Mi", cpu_limit: str = "500m", initial_replicas: int = 1) -> bool:
+    def deploy_function(self, resource: str, function_key: str, version_tag: str, image_tag: str, memory_limit: str = "256Mi", cpu_limit: str = "500m", initial_replicas: int = 1, timeout_seconds: int = 10) -> bool:
         """
-        Creates or updates a Kubernetes Deployment and Service for the serverless function.
+        Creates or updates the Deployment and Service for one version of a function (see services/naming.py).
         """
         if not self.k8s_available:
-            print(f"[K8sService Mock] Deployed function {function_name} with image {image_tag}")
+            print(f"[K8sService Mock] Deployed {resource} with image {image_tag}")
             return True
 
-        app_label = f"fn-{function_name}"
+        app_label = f"fn-{resource}"
         namespace = settings.K8S_NAMESPACE
+        fn_labels = {"app": app_label, "faas-function": function_key, "faas-version": version_tag}
 
         # Security Context
         security_context = client.V1SecurityContext(
             run_as_non_root=True,
             run_as_user=10001,
             allow_privilege_escalation=False,
+            read_only_root_filesystem=True,
             capabilities=client.V1Capabilities(drop=["ALL"])
         )
 
@@ -83,15 +86,25 @@ class K8sService:
             ports=[client.V1ContainerPort(container_port=8080)],
             resources=resources,
             security_context=security_context,
-            readiness_probe=readiness_probe
+            readiness_probe=readiness_probe,
+            env=[client.V1EnvVar(name="EXECUTION_TIMEOUT", value=str(timeout_seconds))],
+            volume_mounts=[client.V1VolumeMount(name="tmp", mount_path="/tmp")]
         )
 
         # Pod Template Spec
         template = client.V1PodTemplateSpec(
-            metadata=client.V1ObjectMeta(labels={"app": app_label, "faas-function": function_name}),
+            metadata=client.V1ObjectMeta(labels=fn_labels),
             spec=client.V1PodSpec(
                 containers=[container],
-                restart_policy="Always"
+                restart_policy="Always",
+                # User code gets no Kubernetes API credentials and no injected service env vars
+                automount_service_account_token=False,
+                enable_service_links=False,
+                security_context=client.V1PodSecurityContext(
+                    seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault")
+                ),
+                # root filesystem is read-only; /tmp is the only writable scratch space
+                volumes=[client.V1Volume(name="tmp", empty_dir=client.V1EmptyDirVolumeSource(size_limit="64Mi"))]
             )
         )
 
@@ -105,7 +118,7 @@ class K8sService:
         deployment_body = client.V1Deployment(
             api_version="apps/v1",
             kind="Deployment",
-            metadata=client.V1ObjectMeta(name=app_label, namespace=namespace, labels={"app": app_label}),
+            metadata=client.V1ObjectMeta(name=app_label, namespace=namespace, labels=fn_labels),
             spec=spec
         )
 
@@ -125,7 +138,7 @@ class K8sService:
         service_body = client.V1Service(
             api_version="v1",
             kind="Service",
-            metadata=client.V1ObjectMeta(name=app_label, namespace=namespace, labels={"app": app_label}),
+            metadata=client.V1ObjectMeta(name=app_label, namespace=namespace, labels=fn_labels),
             spec=client.V1ServiceSpec(
                 selector={"app": app_label},
                 ports=[client.V1ServicePort(port=8080, target_port=8080)],
@@ -140,17 +153,18 @@ class K8sService:
                 self.core_v1.create_namespaced_service(namespace=namespace, body=service_body)
                 print(f"[K8sService] Created ClusterIP Service: {app_label}")
 
+        self._deployment_cache[resource] = (True, time.time())
         return True
 
-    def scale_deployment(self, function_name: str, replicas: int) -> bool:
+    def scale_deployment(self, resource: str, replicas: int) -> bool:
         """
-        Scales the number of replicas for a function deployment (e.g. to 0 for scale-to-zero, or to 1 for warm-up).
+        Scales the Deployment of one function version (0 for scale-to-zero, 1 for warm-up).
         """
         if not self.k8s_available:
-            print(f"[K8sService Mock] Scaled function {function_name} to {replicas} replicas")
+            print(f"[K8sService Mock] Scaled {resource} to {replicas} replicas")
             return True
 
-        app_label = f"fn-{function_name}"
+        app_label = f"fn-{resource}"
         namespace = settings.K8S_NAMESPACE
 
         try:
@@ -165,14 +179,14 @@ class K8sService:
             print(f"[K8sService Error] Failed scaling {app_label}: {e}")
             return False
 
-    def wait_for_ready_pod(self, function_name: str, timeout_seconds: int = 30) -> Optional[str]:
+    def wait_for_ready_pod(self, resource: str, timeout_seconds: int = 30) -> Optional[str]:
         """
         Waits until at least one pod is in Ready condition, and returns the Pod IP or Service hostname.
         """
         if not self.k8s_available:
             return "127.0.0.1"
 
-        app_label = f"fn-{function_name}"
+        app_label = f"fn-{resource}"
         namespace = settings.K8S_NAMESPACE
         start_time = time.time()
 
@@ -183,6 +197,9 @@ class K8sService:
                     label_selector=f"app={app_label}"
                 )
                 for pod in pods.items:
+                    # a Pod still shutting down after a scale-to-zero reports ready but no longer receives traffic
+                    if pod.metadata.deletion_timestamp:
+                        continue
                     if pod.status and pod.status.phase == "Running" and pod.status.pod_ip:
                         # Check container ready status
                         if pod.status.container_statuses:
@@ -195,7 +212,7 @@ class K8sService:
 
         return None
 
-    def has_deployment(self, function_name: str) -> bool:
+    def has_deployment(self, resource: str) -> bool:
         """
         Checks whether the Deployment for a function exists in Kubernetes.
         Caches positive/negative results briefly to avoid saturating K8s API during bursts.
@@ -204,27 +221,27 @@ class K8sService:
             return False
             
         now = time.time()
-        if function_name in self._deployment_cache:
-            exists, cached_at = self._deployment_cache[function_name]
+        if resource in self._deployment_cache:
+            exists, cached_at = self._deployment_cache[resource]
             if (now - cached_at) < 30.0:
                 return exists
 
-        app_label = f"fn-{function_name}"
+        app_label = f"fn-{resource}"
         namespace = settings.K8S_NAMESPACE
         try:
             self.apps_v1.read_namespaced_deployment(name=app_label, namespace=namespace)
-            self._deployment_cache[function_name] = (True, now)
+            self._deployment_cache[resource] = (True, now)
             return True
         except Exception:
-            self._deployment_cache[function_name] = (False, now)
+            self._deployment_cache[resource] = (False, now)
             return False
 
-    def invoke_function(self, function_name: str, payload: dict, timeout_seconds: float = 10.0) -> Dict[str, Any]:
+    def invoke_function(self, resource: str, payload: dict, timeout_seconds: float = 10.0) -> Dict[str, Any]:
         """
         Invokes a function via the Kubernetes API server service proxy (for out-of-cluster)
         or direct cluster DNS (for in-cluster).
         """
-        app_label = f"fn-{function_name}"
+        app_label = f"fn-{resource}"
         namespace = settings.K8S_NAMESPACE
 
         if settings.K8S_IN_CLUSTER:
@@ -241,58 +258,86 @@ class K8sService:
                 }
         else:
             path = f"/api/v1/namespaces/{namespace}/services/http:{app_label}:8080/proxy/execute"
-            resp = self.core_v1.api_client.call_api(
-                path,
-                'POST',
-                header_params={'Content-Type': 'application/json'},
-                body=payload,
-                response_type='object',
-                _request_timeout=timeout_seconds
-            )
-            data = resp[0]
-            status_code = resp[1]
-            if isinstance(data, dict):
-                inner_status = data.get("statusCode", status_code)
-                return {
-                    "status_code": inner_status,
-                    "result": data.get("result"),
-                    "execution_time_ms": data.get("execution_time_ms", 0.0),
-                    "error": data.get("error") if inner_status != 200 else None
-                }
+            # _preload_content=False returns the raw HTTP response, which works across kubernetes client
+            # versions (the older response_type= argument no longer exists)
+            try:
+                raw = self.core_v1.api_client.call_api(
+                    path,
+                    'POST',
+                    header_params={'Content-Type': 'application/json'},
+                    body=payload,
+                    auth_settings=['BearerToken'],
+                    _preload_content=False,
+                    _request_timeout=timeout_seconds
+                )
+                http_status, body = raw.status, raw.data
+            except ApiException as e:
+                # the proxy relays the Pod's own non-2xx answers (504 timeout, 500 handler error) as ApiException
+                http_status, body = e.status, e.body
+            try:
+                data = json.loads(body) if body else {}
+            except (ValueError, TypeError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {"result": data}
+            inner_status = data.get("statusCode", http_status)
             return {
-                "status_code": status_code,
-                "result": data,
-                "execution_time_ms": 0.0,
-                "error": None
+                "status_code": inner_status,
+                "result": data.get("result"),
+                "execution_time_ms": data.get("execution_time_ms", 0.0),
+                "error": (data.get("error") or (body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)))
+                         if inner_status != 200 else None
             }
 
-    def get_function_endpoint(self, function_name: str) -> str:
+    def get_function_endpoint(self, resource: str) -> str:
         """
         Returns the invocation URL for the function inside the cluster or via proxy.
         """
-        app_label = f"fn-{function_name}"
+        app_label = f"fn-{resource}"
         namespace = settings.K8S_NAMESPACE
         if self.k8s_available:
             return f"http://{app_label}.{namespace}.svc.cluster.local:8080/execute"
         return f"http://127.0.0.1:8080/execute"
 
-    def delete_function(self, function_name: str) -> bool:
+    def scale_function(self, function_key: str, replicas: int) -> Optional[bool]:
         """
-        Deletes the Deployment and Service for the function.
+        Scales every version Deployment of a function. Returns None if Kubernetes is unavailable or the
+        function has no Deployments, otherwise True only if all of them were scaled successfully.
+        """
+        if not self.k8s_available:
+            return None
+        try:
+            deployments = self.apps_v1.list_namespaced_deployment(
+                namespace=settings.K8S_NAMESPACE, label_selector=f"faas-function={function_key}"
+            )
+        except Exception as e:
+            print(f"[K8sService Error] Failed listing deployments for {function_key}: {e}")
+            return False
+        if not deployments.items:
+            return None
+        # Deployment names are "fn-<resource>"
+        return all(self.scale_deployment(d.metadata.name[len("fn-"):], replicas) for d in deployments.items)
+
+    def delete_function(self, function_key: str) -> bool:
+        """
+        Deletes the Deployments and Services of every version of a function.
         """
         if not self.k8s_available:
             return True
 
-        app_label = f"fn-{function_name}"
         namespace = settings.K8S_NAMESPACE
-
+        selector = f"faas-function={function_key}"
+        ok = True
         try:
-            self.apps_v1.delete_namespaced_deployment(name=app_label, namespace=namespace)
-            self.core_v1.delete_namespaced_service(name=app_label, namespace=namespace)
-            print(f"[K8sService] Cleaned up Kubernetes resources for {function_name}")
-            return True
+            for dep in self.apps_v1.list_namespaced_deployment(namespace=namespace, label_selector=selector).items:
+                self.apps_v1.delete_namespaced_deployment(name=dep.metadata.name, namespace=namespace)
+                self._deployment_cache.pop(dep.metadata.name[len("fn-"):], None)
+            for svc in self.core_v1.list_namespaced_service(namespace=namespace, label_selector=selector).items:
+                self.core_v1.delete_namespaced_service(name=svc.metadata.name, namespace=namespace)
+            print(f"[K8sService] Cleaned up Kubernetes resources for {function_key}")
         except Exception as e:
             print(f"[K8sService Warning] Cleanup error: {e}")
-            return False
+            ok = False
+        return ok
 
 k8s_service = K8sService()

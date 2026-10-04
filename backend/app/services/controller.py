@@ -5,6 +5,8 @@ from backend.app.core.config import settings
 from backend.app.core.db import SessionLocal
 from backend.app.models.function import Function
 from backend.app.services.k8s_client import k8s_service
+from backend.app.services.naming import function_key
+from backend.app.services.router import mark_cold
 
 class FaasController:
     def __init__(self):
@@ -49,12 +51,11 @@ class FaasController:
                 last_activity = fn.last_invoked_at or fn.created_at
                 if last_activity < threshold:
                     print(f"[FaasController] Function '{fn.name}' idle for >{settings.IDLE_TIMEOUT_SECONDS}s. Scaling to 0...")
-                    has_dep = k8s_service.has_deployment(fn.name)
-                    success = True
-                    if has_dep:
-                        success = k8s_service.scale_deployment(fn.name, 0)
-                    
-                    if success or not has_dep:
+                    # Scales every version's Deployment; None means there is nothing deployed to scale
+                    scaled = k8s_service.scale_function(function_key(fn.owner_id, fn.name), 0)
+
+                    if scaled is not False:
+                        mark_cold(fn.id)
                         fn.active_replicas = 0
                         fn.status = "SCALED_TO_ZERO"
                         fn.status_message = f"Scaled to 0 replicas due to inactivity (idle > {settings.IDLE_TIMEOUT_SECONDS}s)"

@@ -1,51 +1,30 @@
 import time
 import requests
-import json
 import statistics
-
-BASE_URL = "http://127.0.0.1:8000/api/v1"
+from common import BASE_URL, register_user, create_function, wait_for_status, require_k8s
 
 def run_cold_vs_warm_benchmark(function_name="bench-calc", iterations=10):
     print("=" * 60)
     print(" EXPERIMENT 1: COLD START VS. WARM START LATENCY BENCHMARK ")
     print("=" * 60)
 
-    # 1. Register test user & login
-    username = f"benchuser_{int(time.time())}"
-    reg_resp = requests.post(f"{BASE_URL}/auth/register", json={
-        "username": username,
-        "email": f"{username}@test.com",
-        "password": "Password123!"
-    })
-    token = reg_resp.json()["access_token"]
-    headers = {"Authorization": f"Bearer {token}"}
-
-    # 2. Create function
-    code = """def handler(event):
-    n = event.get("n", 30)
-    # CPU calculation: Fibonacci
-    a, b = 0, 1
-    for _ in range(n):
-        a, b = b, a + b
-    return {"fibonacci": a, "n": n}
-"""
+    # 1. Register test user & create function
+    headers = register_user()
     print(f"[1] Creating function '{function_name}'...")
-    create_resp = requests.post(f"{BASE_URL}/functions/", headers=headers, json={
-        "name": function_name,
-        "runtime": "python311",
-        "code": code,
-        "description": "Fibonacci calculation for cold/warm latency benchmarking"
-    })
-    print(f"    Status: {create_resp.status_code}")
+    create_function(headers, function_name)
+    wait_for_status(headers, function_name, {"READY", "RUNNING"})
 
-    # Wait for ready
-    time.sleep(2)
+    # 2. Let the reaper scale it to zero so the first call is a genuine cold start
+    print(f"[1b] Waiting for scale-to-zero (idle timeout + reaper interval)...")
+    wait_for_status(headers, function_name, {"SCALED_TO_ZERO"}, timeout=300)
 
     # 3. Trigger Cold Start Invocation
     print("\n[2] Executing Cold Start Invocation...")
-    cold_resp = requests.post(f"{BASE_URL}/invoke/{function_name}", json={"n": 25})
+    cold_resp = requests.post(f"{BASE_URL}/invoke/{function_name}", headers=headers, json={"n": 25})
     cold_data = cold_resp.json()
     print(f"    Cold Start Response: {cold_data}")
+    executed_on = [cold_data.get("executed_on")]
+    assert cold_data.get("is_cold_start"), "first call was not a cold start"
     cold_total_ms = cold_data.get("total_duration_ms", 0.0)
     cold_provisioning_ms = cold_data.get("cold_start_duration_ms", 0.0)
     cold_exec_ms = cold_data.get("execution_duration_ms", 0.0)
@@ -55,10 +34,13 @@ def run_cold_vs_warm_benchmark(function_name="bench-calc", iterations=10):
     warm_latencies = []
     for i in range(iterations):
         t0 = time.perf_counter()
-        resp = requests.post(f"{BASE_URL}/invoke/{function_name}", json={"n": 25})
+        resp = requests.post(f"{BASE_URL}/invoke/{function_name}", headers=headers, json={"n": 25})
+        executed_on.append(resp.json().get("executed_on"))
         warm_ms = (time.perf_counter() - t0) * 1000.0
         warm_latencies.append(warm_ms)
         time.sleep(0.05)
+
+    require_k8s(executed_on)
 
     # 5. Summarize Results
     avg_warm = statistics.mean(warm_latencies)

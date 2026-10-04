@@ -11,6 +11,7 @@ class InvokeResponse(BaseModel):
     function_name: str
     version: str
     status_code: int
+    executed_on: str = "unknown"
     is_cold_start: bool
     cold_start_duration_ms: float
     execution_duration_ms: float
@@ -27,6 +28,7 @@ class InvocationLogOut(BaseModel):
     cold_start_duration_ms: float
     execution_duration_ms: float
     total_duration_ms: float
+    executed_on: Optional[str] = "unknown"
     status_code: int
     payload_input: Optional[str] = ""
     payload_output: Optional[str] = ""
