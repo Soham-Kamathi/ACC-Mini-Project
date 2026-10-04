@@ -33,6 +33,19 @@ class Settings(BaseSettings):
 
     # Runs user code with exec() inside the API process when Kubernetes is unavailable.
     # UNSAFE (arbitrary code execution on the host) - only enable for local development/tests.
+    # Database connection pool (a burst of invocations plus the dashboard must not exhaust it)
+    DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "20"))
+    DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", "40"))
+    DB_POOL_TIMEOUT: int = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+
+    # Autoscaler
+    AUTOSCALE_INTERVAL_SECONDS: float = float(os.getenv("AUTOSCALE_INTERVAL_SECONDS", "2"))
+    SCALE_DOWN_STABILIZATION_SECONDS: float = float(os.getenv("SCALE_DOWN_STABILIZATION_SECONDS", "30"))
+    MAX_REPLICAS_LIMIT: int = 20  # hard ceiling a user can configure per function
+    DEFAULT_MIN_REPLICAS: int = 0
+    DEFAULT_MAX_REPLICAS: int = 5
+    DEFAULT_TARGET_CONCURRENCY: int = 5  # in-flight requests one Pod should handle
+
     # Public (API key) invocation limits
     API_KEY_RATE_LIMIT_PER_MINUTE: int = int(os.getenv("API_KEY_RATE_LIMIT_PER_MINUTE", "120"))
     MAX_PAYLOAD_BYTES: int = int(os.getenv("MAX_PAYLOAD_BYTES", str(1024 * 1024)))

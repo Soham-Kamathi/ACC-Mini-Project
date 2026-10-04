@@ -11,6 +11,7 @@ from backend.app.models.function import Function, FunctionVersion
 from backend.app.models.invocation import InvocationLog
 from backend.app.services.k8s_client import k8s_service
 from backend.app.services.naming import resource_name
+from backend.app.services.autoscaler import autoscaler
 
 # Prometheus Metrics Definitions
 INVOCATION_COUNT = Counter(
@@ -61,6 +62,10 @@ def mark_warm(function_id: int, version_tag: str):
 
 def mark_cold(function_id: int):
     _warm_versions.pop(function_id, None)
+    autoscaler.forget_function(function_id)
+
+def is_warm(function_id: int, version_tag: str) -> bool:
+    return version_tag in _warm_versions.get(function_id, ())
 
 def invalidate_router_cache(fn_id: Optional[int] = None):
     global _version_cache
@@ -120,7 +125,8 @@ async def _batch_log_worker():
                             fn_obj = bg_db.query(Function).filter(Function.id == fn_id).first()
                             if fn_obj:
                                 fn_obj.last_invoked_at = now_dt
-                                fn_obj.active_replicas = 1
+                                if not fn_obj.active_replicas:
+                                    fn_obj.active_replicas = 1
                                 fn_obj.status = "RUNNING"
                         bg_db.add(InvocationLog(**log_kwargs))
                     bg_db.commit()
@@ -166,12 +172,14 @@ class RouterService:
         return version
 
     async def _cold_start(self, function: Function, version: FunctionVersion, resource: str, has_k8s_deployment: bool) -> float:
+        replicas = max(1, function.min_replicas or 0)
         COLD_START_COUNT.labels(function_name=function.name).inc()
         cold_start_begin = time.perf_counter()
 
         if has_k8s_deployment:
-            print(f"[RouterService] Cold start detected for '{resource}'. Scaling up to 1 replica in K8s...")
-            await asyncio.to_thread(k8s_service.scale_deployment, resource, 1)
+            print(f"[RouterService] Cold start detected for '{resource}'. Scaling up to {replicas} replica(s) in K8s...")
+            await asyncio.to_thread(k8s_service.scale_deployment, resource, replicas)
+            autoscaler.track(function.id, resource, current=replicas)
             ready_ip = await asyncio.to_thread(k8s_service.wait_for_ready_pod, resource, 30)
             if not ready_ip and k8s_service.k8s_available:
                 raise RuntimeError(f"Timed out waiting for Pod readiness for function '{function.name}' ({version.version_tag})")
@@ -182,18 +190,18 @@ class RouterService:
         print(f"[RouterService] Cold start completed in {cold_start_duration_ms:.2f}ms")
 
         mark_warm(function.id, version.version_tag)
-        function.active_replicas = 1
+        function.active_replicas = replicas
         function.status = "RUNNING"
         def _mark_running(fn_id: int):
             from backend.app.core.db import SessionLocal
             with SessionLocal() as s:
                 f = s.query(Function).filter(Function.id == fn_id).first()
                 if f:
-                    f.active_replicas = 1
+                    f.active_replicas = replicas
                     f.status = "RUNNING"
                     s.commit()
         await asyncio.to_thread(_mark_running, function.id)
-        ACTIVE_REPLICAS.labels(function_name=function.name).set(1)
+        ACTIVE_REPLICAS.labels(function_name=function.name).set(replicas)
         return cold_start_duration_ms
 
     async def invoke_function(
@@ -214,6 +222,11 @@ class RouterService:
         version = self._resolve_version(db, function, version_tag)
         resource = resource_name(function.owner_id, function.name, version.version_tag)
 
+        # Everything below (waiting for a cold start, the call to the Pod) can take seconds and needs no DB.
+        # Give the connection back now: holding it for the whole call let a burst of invocations use up the
+        # pool and starve every other request, including the dashboard's. Loaded objects stay readable.
+        db.close()
+
         has_k8s_deployment = await asyncio.to_thread(k8s_service.has_deployment, resource)
         sandbox_allowed = settings.ALLOW_LOCAL_SANDBOX
 
@@ -230,53 +243,55 @@ class RouterService:
             error_msg = (f"No running deployment for '{function.name}' ({version.version_tag}) and the in-process "
                          "sandbox is disabled (set ALLOW_LOCAL_SANDBOX=true for local development only)")
         else:
-            # 2. Cold Start Activation if this version's Deployment is not known to be warm.
-            # The lock makes concurrent requests share one cold start instead of each scaling up.
-            if version.version_tag not in _warm_versions.get(function.id, ()):
-                lock = _cold_start_locks.setdefault(resource, asyncio.Lock())
-                async with lock:
-                    if version.version_tag not in _warm_versions.get(function.id, ()):
-                        is_cold_start = True
-                        cold_start_duration_ms = await self._cold_start(function, version, resource, has_k8s_deployment)
+            autoscaler.track(function.id, resource)
+            with autoscaler.in_flight(resource):
+                # 2. Cold Start Activation if this version's Deployment is not known to be warm.
+                # The lock makes concurrent requests share one cold start instead of each scaling up.
+                if version.version_tag not in _warm_versions.get(function.id, ()):
+                    lock = _cold_start_locks.setdefault(resource, asyncio.Lock())
+                    async with lock:
+                        if version.version_tag not in _warm_versions.get(function.id, ()):
+                            is_cold_start = True
+                            cold_start_duration_ms = await self._cold_start(function, version, resource, has_k8s_deployment)
 
-            # 3. Dispatch Invocation
-            def _run_sandbox() -> Tuple[int, Any, Optional[str], float]:
-                t0 = time.perf_counter()
-                code, res, err = _execute_sandbox(version.code, payload)
-                return code, res, err, (time.perf_counter() - t0) * 1000.0
+                # 3. Dispatch Invocation
+                def _run_sandbox() -> Tuple[int, Any, Optional[str], float]:
+                    t0 = time.perf_counter()
+                    code, res, err = _execute_sandbox(version.code, payload)
+                    return code, res, err, (time.perf_counter() - t0) * 1000.0
 
-            if has_k8s_deployment:
-                executed_on = EXEC_K8S
-                try:
-                    inv_res = await asyncio.to_thread(
-                        k8s_service.invoke_function, resource, payload, float(function.timeout_seconds) + 5.0
-                    )
-                    status_code = inv_res["status_code"]
-                    result = inv_res["result"]
-                    execution_duration_ms = inv_res.get("execution_time_ms", 0.0)
-                    error_msg = inv_res.get("error")
-                    # Only infrastructure errors (Pod not routable yet) may fall back; 500/504 from the
-                    # function itself are real results and must not be re-executed elsewhere.
-                    if status_code in (502, 503) and sandbox_allowed and version.code:
-                        print(f"[RouterService Warning] K8s returned status {status_code}: {error_msg}. Falling back to sandbox.")
-                        executed_on = EXEC_SANDBOX
-                        status_code, result, error_msg, execution_duration_ms = _run_sandbox()
-                except Exception as e:
-                    if sandbox_allowed and version.code:
-                        print(f"[RouterService Warning] Kubernetes invocation failed: {e}. Falling back to sandbox.")
-                        executed_on = EXEC_SANDBOX
+                if has_k8s_deployment:
+                    executed_on = EXEC_K8S
+                    try:
+                        inv_res = await asyncio.to_thread(
+                            k8s_service.invoke_function, resource, payload, float(function.timeout_seconds) + 5.0
+                        )
+                        status_code = inv_res["status_code"]
+                        result = inv_res["result"]
+                        execution_duration_ms = inv_res.get("execution_time_ms", 0.0)
+                        error_msg = inv_res.get("error")
+                        # Only infrastructure errors (Pod not routable yet) may fall back; 500/504 from the
+                        # function itself are real results and must not be re-executed elsewhere.
+                        if status_code in (502, 503) and sandbox_allowed and version.code:
+                            print(f"[RouterService Warning] K8s returned status {status_code}: {error_msg}. Falling back to sandbox.")
+                            executed_on = EXEC_SANDBOX
+                            status_code, result, error_msg, execution_duration_ms = _run_sandbox()
+                    except Exception as e:
+                        if sandbox_allowed and version.code:
+                            print(f"[RouterService Warning] Kubernetes invocation failed: {e}. Falling back to sandbox.")
+                            executed_on = EXEC_SANDBOX
+                            status_code, result, error_msg, execution_duration_ms = _run_sandbox()
+                        else:
+                            status_code = 502
+                            error_msg = f"Invocation proxy error: {str(e)}"
+                else:
+                    # Only reachable with ALLOW_LOCAL_SANDBOX (local development / tests)
+                    executed_on = EXEC_SANDBOX
+                    if version.code:
                         status_code, result, error_msg, execution_duration_ms = _run_sandbox()
                     else:
-                        status_code = 502
-                        error_msg = f"Invocation proxy error: {str(e)}"
-            else:
-                # Only reachable with ALLOW_LOCAL_SANDBOX (local development / tests)
-                executed_on = EXEC_SANDBOX
-                if version.code:
-                    status_code, result, error_msg, execution_duration_ms = _run_sandbox()
-                else:
-                    status_code = 500
-                    error_msg = f"No code version found for function '{function.name}'"
+                        status_code = 500
+                        error_msg = f"No code version found for function '{function.name}'"
 
         total_duration_ms = cold_start_duration_ms + execution_duration_ms
 

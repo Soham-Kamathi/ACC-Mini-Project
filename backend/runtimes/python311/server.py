@@ -138,9 +138,14 @@ class FunctionRequestHandler(BaseHTTPRequestHandler):
         # Override to log structured info
         sys.stderr.write(f"[Runtime Log] {self.address_string()} - {format % args}\n")
 
+class _FunctionHTTPServer(ThreadingHTTPServer):
+    # The default listen backlog is 5; a burst of concurrent callers would get connection resets.
+    request_queue_size = 256
+    daemon_threads = True
+
 def run_server(port=8080):
     server_address = ("", port)
-    httpd = ThreadingHTTPServer(server_address, FunctionRequestHandler)
+    httpd = _FunctionHTTPServer(server_address, FunctionRequestHandler)
     print(f"[Runtime] Serverless Function Runner listening on port {port}...")
     httpd.serve_forever()
 

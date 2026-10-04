@@ -60,3 +60,6 @@ yarn-error.log*
 .idea/
 .DS_Store
 Thumbs.db
+
+# Manual test script containing a real API key
+load_test.py

@@ -21,6 +21,9 @@ interface FunctionItem {
   cpu_limit: string;
   timeout_seconds: number;
   active_replicas: number;
+  min_replicas: number;
+  max_replicas: number;
+  target_concurrency: number;
   last_invoked_at: string | null;
   created_at: string;
 }
@@ -128,6 +131,7 @@ export default function App() {
   const [logs, setLogs] = useState<InvocationLog[]>([]);
   const [clusterStatus, setClusterStatus] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [backendBusy, setBackendBusy] = useState(false);
 
   // Function Form State
   const [fnName, setFnName] = useState('calc-fibonacci');
@@ -137,6 +141,9 @@ export default function App() {
   const [fnMemory, setFnMemory] = useState('256Mi');
   const [fnCpu, setFnCpu] = useState('500m');
   const [fnTimeout, setFnTimeout] = useState(10);
+  const [fnMinReplicas, setFnMinReplicas] = useState(0);
+  const [fnMaxReplicas, setFnMaxReplicas] = useState(5);
+  const [fnTargetConc, setFnTargetConc] = useState(5);
   const [deployMsg, setDeployMsg] = useState('');
 
   // Invocation State
@@ -218,17 +225,19 @@ export default function App() {
     if (!token) return;
     try {
       setLoading(true);
+      // A failed request must not wipe the screen: keep the last data we received and tell the user.
       const [fnRes, statsRes, logsRes, clusterRes] = await Promise.all([
-        axios.get(`${API_BASE}/functions/`, getHeaders()).catch(() => ({ data: [] })),
-        axios.get(`${API_BASE}/stats`, getHeaders()).catch(() => ({ data: null })),
-        axios.get(`${API_BASE}/logs/recent`, getHeaders()).catch(() => ({ data: [] })),
-        axios.get(`${API_BASE}/cluster/status`).catch(() => ({ data: null }))
+        axios.get(`${API_BASE}/functions/`, getHeaders()).catch(() => null),
+        axios.get(`${API_BASE}/stats`, getHeaders()).catch(() => null),
+        axios.get(`${API_BASE}/logs/recent`, getHeaders()).catch(() => null),
+        axios.get(`${API_BASE}/cluster/status`).catch(() => null)
       ]);
-      setFunctions(fnRes.data || []);
-      setStats(statsRes.data || null);
-      setLogs(logsRes.data || []);
-      setClusterStatus(clusterRes.data || null);
-      if (fnRes.data?.length > 0 && !selectedFnRef.current) {
+      setBackendBusy(!fnRes || !statsRes || !logsRes || !clusterRes);
+      if (fnRes) setFunctions(fnRes.data || []);
+      if (statsRes) setStats(statsRes.data || null);
+      if (logsRes) setLogs(logsRes.data || []);
+      if (clusterRes) setClusterStatus(clusterRes.data || null);
+      if (fnRes && fnRes.data?.length > 0 && !selectedFnRef.current) {
         const firstFn = fnRes.data[0].name;
         selectedFnRef.current = firstFn;
         setSelectedFn(firstFn);
@@ -262,7 +271,10 @@ export default function App() {
         code: fnCode,
         memory_limit: fnMemory,
         cpu_limit: fnCpu,
-        timeout_seconds: fnTimeout
+        timeout_seconds: fnTimeout,
+        min_replicas: fnMinReplicas,
+        max_replicas: fnMaxReplicas,
+        target_concurrency: fnTargetConc
       }, getHeaders());
       setDeployMsg(`Function '${fnName}' created and submitted for image build & deployment!`);
       fetchData();
@@ -479,6 +491,12 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+        {backendBusy && (
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-xs text-amber-300">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            The backend is busy or unreachable. Showing the last data received; retrying automatically.
+          </div>
+        )}
         
         {/* KPI Stat Cards */}
         {stats && (
@@ -616,7 +634,7 @@ export default function App() {
                         </div>
                         <div className="flex justify-between">
                           <span>Replicas:</span>
-                          <span className="text-slate-200">{fn.active_replicas} pod(s)</span>
+                          <span className="text-slate-200">{fn.active_replicas} pod(s) <span className="text-slate-500">(autoscale {fn.min_replicas}-{fn.max_replicas})</span></span>
                         </div>
                         <div className="flex justify-between">
                           <span>Resource Limits:</span>
@@ -730,6 +748,36 @@ export default function App() {
                     <option value="1024Mi">1024 MB (Max)</option>
                   </select>
                 </div>
+              </div>
+
+              <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-xl space-y-3">
+                <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Autoscaling</div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">Min replicas</label>
+                    <input type="number" min={0} max={20} value={fnMinReplicas}
+                      onChange={(e) => setFnMinReplicas(Math.max(0, Number(e.target.value)))}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">Max replicas</label>
+                    <input type="number" min={1} max={20} value={fnMaxReplicas}
+                      onChange={(e) => setFnMaxReplicas(Math.max(1, Number(e.target.value)))}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">Requests per pod</label>
+                    <input type="number" min={1} max={100} value={fnTargetConc}
+                      onChange={(e) => setFnTargetConc(Math.max(1, Number(e.target.value)))}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500" />
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Pods are added when concurrent requests exceed what the current pods are sized for, up to the maximum. Min 0 allows scale-to-zero when idle; a higher minimum keeps pods warm. Set min = max for a fixed count.
+                </p>
+                {fnMinReplicas > fnMaxReplicas && (
+                  <p className="text-[11px] text-red-400">Min replicas must not exceed max replicas.</p>
+                )}
               </div>
 
               <div>
@@ -880,8 +928,8 @@ export default function App() {
                 <h2 className="text-lg font-semibold text-white mb-4 flex items-center justify-between">
                   <span>Execution Result</span>
                   {invokeResult && (
-                    <span className={`text-xs px-2.5 py-1 rounded-full font-medium border ${invokeResult.is_cold_start ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'}`}>
-                      {invokeResult.is_cold_start ? 'Cold Start' : 'Warm Invocation'}
+                    <span className={`text-xs px-2.5 py-1 rounded-full font-medium border ${invokeResult.executed_on === 'none' ? 'bg-red-500/10 text-red-400 border-red-500/30' : invokeResult.is_cold_start ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'}`}>
+                      {invokeResult.executed_on === 'none' ? 'Not Executed' : invokeResult.is_cold_start ? 'Cold Start' : 'Warm Invocation'}
                     </span>
                   )}
                 </h2>

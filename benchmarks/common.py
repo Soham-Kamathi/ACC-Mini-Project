@@ -19,10 +19,10 @@ def register_user(prefix="benchuser"):
     resp.raise_for_status()
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
 
-def create_function(headers, name, code=FIB_CODE):
+def create_function(headers, name, code=FIB_CODE, timeout_seconds=10):
     resp = requests.post(f"{BASE_URL}/functions/", headers=headers, json={
         "name": name, "runtime": "python311", "code": code,
-        "description": "Fibonacci benchmark function"})
+        "description": "Fibonacci benchmark function", "timeout_seconds": timeout_seconds})
     resp.raise_for_status()
 
 def wait_for_status(headers, name, wanted, timeout=180):

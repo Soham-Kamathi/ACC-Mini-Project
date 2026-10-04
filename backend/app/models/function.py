@@ -25,6 +25,12 @@ class Function(Base):
     timeout_seconds = Column(Integer, default=10)
     
     active_replicas = Column(Integer, default=0)
+
+    # Autoscaling: replicas stay within [min, max]; one Pod is sized for `target_concurrency` in-flight requests.
+    # min_replicas=0 enables scale-to-zero; min_replicas == max_replicas pins a fixed replica count.
+    min_replicas = Column(Integer, default=0, nullable=False)
+    max_replicas = Column(Integer, default=5, nullable=False)
+    target_concurrency = Column(Integer, default=5, nullable=False)
     last_invoked_at = Column(DateTime, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)

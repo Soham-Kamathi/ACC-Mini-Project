@@ -1,4 +1,5 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
+from backend.app.core.config import settings
 from datetime import datetime
 from typing import Optional, List
 
@@ -16,6 +17,15 @@ class FunctionCreate(BaseModel):
     memory_limit: Optional[str] = "256Mi"
     cpu_limit: Optional[str] = "500m"
     timeout_seconds: Optional[int] = 10
+    min_replicas: int = Field(settings.DEFAULT_MIN_REPLICAS, ge=0, le=settings.MAX_REPLICAS_LIMIT, description="0 enables scale-to-zero")
+    max_replicas: int = Field(settings.DEFAULT_MAX_REPLICAS, ge=1, le=settings.MAX_REPLICAS_LIMIT)
+    target_concurrency: int = Field(settings.DEFAULT_TARGET_CONCURRENCY, ge=1, le=100, description="In-flight requests one Pod should handle")
+
+    @model_validator(mode="after")
+    def _min_not_above_max(self):
+        if self.min_replicas > self.max_replicas:
+            raise ValueError("min_replicas must be <= max_replicas")
+        return self
 
 class FunctionUpdate(BaseModel):
     description: Optional[str] = None
@@ -24,6 +34,9 @@ class FunctionUpdate(BaseModel):
     memory_limit: Optional[str] = None
     cpu_limit: Optional[str] = None
     timeout_seconds: Optional[int] = None
+    min_replicas: Optional[int] = Field(None, ge=0, le=settings.MAX_REPLICAS_LIMIT)
+    max_replicas: Optional[int] = Field(None, ge=1, le=settings.MAX_REPLICAS_LIMIT)
+    target_concurrency: Optional[int] = Field(None, ge=1, le=100)
     version_tag: Optional[str] = Field(None, pattern=VERSION_PATTERN, description="Lowercase DNS-1123 label, max 12 chars")
 
 class FunctionVersionOut(BaseModel):
@@ -52,6 +65,9 @@ class FunctionOut(BaseModel):
     cpu_limit: str
     timeout_seconds: int
     active_replicas: int
+    min_replicas: int = 0
+    max_replicas: int = 5
+    target_concurrency: int = 5
     last_invoked_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime

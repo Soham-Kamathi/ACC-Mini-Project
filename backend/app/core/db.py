@@ -7,7 +7,10 @@ if settings.DATABASE_URL.startswith("sqlite"):
     from sqlalchemy import event
     engine = create_engine(
         settings.DATABASE_URL,
-        connect_args={"check_same_thread": False, "timeout": 30}
+        connect_args={"check_same_thread": False, "timeout": 30},
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
     )
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
@@ -18,7 +21,10 @@ if settings.DATABASE_URL.startswith("sqlite"):
 else:
     engine = create_engine(
         settings.DATABASE_URL,
-        pool_pre_ping=True
+        pool_pre_ping=True,
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
     )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -43,6 +49,9 @@ def _add_missing_columns():
     additions = [
         ("invocation_logs", "executed_on", "VARCHAR(16) DEFAULT 'unknown'"),
         ("functions", "public_id", "VARCHAR(32)"),
+        ("functions", "min_replicas", "INTEGER NOT NULL DEFAULT 0"),
+        ("functions", "max_replicas", "INTEGER NOT NULL DEFAULT 5"),
+        ("functions", "target_concurrency", "INTEGER NOT NULL DEFAULT 5"),
     ]
     insp = inspect(engine)
     for table, column, ddl in additions:

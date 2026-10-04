@@ -2,7 +2,7 @@
 
 **Project:** Kubernetes-Based Docker Serverless (FaaS) Function Execution Platform
 **Last updated:** 2026-10-04
-**Test suite:** 29 backend tests, all passing (`.venv\Scripts\python.exe -m pytest backend/tests -q`). The tests stub Docker and Kubernetes, so they run anywhere.
+**Test suite:** 40 backend tests, all passing (`.venv\Scripts\python.exe -m pytest backend/tests -q`). The tests stub Docker and Kubernetes, so they run anywhere.
 
 This file records what has been built, what was changed and fixed in the latest hardening pass, what has and has not been verified, and what is still open. `tasks.md` is the older checklist; where the two disagree, this file is newer.
 
@@ -47,6 +47,18 @@ Where data lives: users, functions, version source code, API key hashes and invo
 - Now: one Deployment and Service per version, named `fn-<owner_id>-<name>-<version>`, all labelled `faas-function=<owner_id>-<name>`.
 - A version becomes routable only after its build and deploy succeed. The previous version keeps serving while a new one builds, and a failed build no longer takes down a working function.
 - Version tags use max+1 (not count+1) and duplicates are rejected with 400.
+
+**Autoscaling (scale up as traffic grows)**
+- Each function has `min_replicas` (default 0), `max_replicas` (default 5, limit 20) and `target_concurrency` (default 5 in-flight requests per Pod), settable at creation or via `PUT`, and in the dashboard create form.
+- A new autoscaler (`services/autoscaler.py`, run by the controller every 2 s) counts requests in flight per function version, including requests waiting on a cold start, and sets `replicas = ceil(in_flight / target)` within `[max(min, 1), max]`.
+- Scale up is immediate and uses the peak since the last check, so short bursts are not missed. Scale down is damped to the highest demand of the last 30 s so Pods do not flap.
+- Scale to zero is still done by the idle reaper after 60 s of no traffic, but never when `min_replicas > 0`. `min == max` gives a fixed replica count.
+- `GET /api/v1/functions/{name}/scaling` returns the bounds plus desired, ready and in-flight numbers. New Prometheus metrics: `faas_scale_events_total`, `faas_desired_replicas`, `faas_inflight_peak_requests`.
+- Experiment 3 (`benchmarks/scaling_test.py`) is written and has been run against the cluster. Results are in the README: about 6x throughput at 10 replicas, and the autoscaler went from 1 to 10 Pods in about 6 s under load and back to 1 about 30 s after the load stopped.
+- Bugs found by this run and fixed: the Pod's listen backlog of 5 caused connection resets under bursts; a transient Kubernetes API error was cached as "not deployed" for 30 s; the log worker reset the replica count to 1 after every batch.
+- Dashboard: a failed invocation that never ran now shows "Not Executed" instead of "Warm Invocation".
+- **Database connection pool exhaustion under bursts (found by the demo script).** Each invocation held its database connection for the whole call, including the wait for a Pod, so a burst of 20 calls used up the default pool (size 5, overflow 10). The dashboard's own requests then timed out after 30 s and the UI showed an empty catalog. The connection is now released as soon as the function and version are looked up, and the pool is larger (`DB_POOL_SIZE` 20, `DB_MAX_OVERFLOW` 40). A regression test checks that no connection is held during the Pod call.
+- Dashboard: a failed refresh no longer wipes the screen. It keeps the last data and shows a "backend is busy or unreachable" banner.
 
 **Tenant isolation**
 - Invoke requires a credential. Functions are looked up by `(owner, name)`, so two users can both own `hello` without colliding in the database or in Kubernetes (the owner id is part of every resource name).
@@ -103,7 +115,6 @@ Run against Docker Desktop Kubernetes with `ALLOW_LOCAL_SANDBOX=false`:
 
 **Not yet done**
 - [ ] **Re-run Experiments 1 and 2.** The numbers in the README predate these fixes and are marked as unverified. The scripts now fail loudly if any call did not run in a Pod.
-- [ ] **Experiment 3 (replica scaling)** has no script, and the router only ever scales to one replica. Needs a configurable replica count or an HPA first.
 - [ ] Prometheus scrape config and Grafana service/dashboard (the exporter exists; the stack does not).
 - [ ] Stdout/stderr capture per invocation, shown in the dashboard.
 - [ ] Environment variables / secrets for functions.
@@ -116,6 +127,9 @@ Run against Docker Desktop Kubernetes with `ALLOW_LOCAL_SANDBOX=false`:
 - **Apply the ingress policy only for an in-cluster backend.** With the backend outside the cluster (current dev setup), calls arrive through the API server proxy, whose source address depends on the network plugin, so default-deny ingress could block them. In that mode apply only the egress policy.
 - Apply with: `kubectl apply -f k8s/networkpolicy-egress.yaml` (and `-f k8s/networkpolicy-ingress.yaml` for an in-cluster backend).
 - The SQLite path is relative to where `uvicorn` is started. Start it from another folder and you get a new empty database. Set `DATABASE_URL` to an absolute path (or move to the Postgres container in `docker-compose.yml`, which the code does not use yet).
+- **The API process is a throughput ceiling.** With very light functions, throughput plateaus at about 85-90 req/s regardless of replica count. Replica scaling only helps when the Pods are the bottleneck. Running several backend workers (which needs the in-memory rate limiter, warm state and autoscaler counters moved to shared storage) would raise it.
+- The autoscaler's in-flight counts are per backend process; with more than one worker each would see only part of the demand.
+- Scale-up takes about 6 s from decision to ready Pods with a local image; a larger image or a remote registry would take longer, and requests during that time share the Pods that are already up.
 - Rate limiting and warm/cold state are in memory, so they are per backend process and reset on restart. After a restart the first call per version is reported as a cold start even if the Pod is still running.
 - Log entries are queued in memory and written in batches; a crash can lose the last few.
 - The request-size cap checks `Content-Length`; a chunked upload without that header is not capped.
@@ -129,8 +143,7 @@ Run against Docker Desktop Kubernetes with `ALLOW_LOCAL_SANDBOX=false`:
 ## 5. Recommended next steps
 
 1. Re-run Experiments 1 and 2 against the cluster and replace the README numbers.
-2. Add replica count / HPA support, then write Experiment 3 (1, 2, 5, 10 replicas).
-3. Add Prometheus and Grafana to `docker-compose.yml` with a provisioned dashboard (cold-start ratio, RPS, p50/p95/p99).
-4. Capture stdout/stderr per invocation and show it in the dashboard.
-5. Move the database to Postgres (already in compose) and make the rate limiter and warm state shared, if the API will run as more than one process.
-6. Prepare the course deliverables: architecture diagram, comparison against an always-on container baseline, and the final report.
+2. Add Prometheus and Grafana to `docker-compose.yml` with a provisioned dashboard (cold-start ratio, RPS, p50/p95/p99).
+3. Capture stdout/stderr per invocation and show it in the dashboard.
+4. Move the database to Postgres (already in compose) and make the rate limiter and warm state shared, if the API will run as more than one process.
+5. Prepare the course deliverables: architecture diagram, comparison against an always-on container baseline, and the final report.

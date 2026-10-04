@@ -212,6 +212,30 @@ class K8sService:
 
         return None
 
+    def get_replica_status(self, resource: str) -> Optional[Dict[str, int]]:
+        """Returns {"desired": spec.replicas, "ready": ready Pods} for a version's Deployment, or None if absent."""
+        if not self.k8s_available:
+            return None
+        try:
+            dep = self.apps_v1.read_namespaced_deployment(name=f"fn-{resource}", namespace=settings.K8S_NAMESPACE)
+        except Exception:
+            return None
+        return {"desired": dep.spec.replicas or 0, "ready": (dep.status.ready_replicas or 0) if dep.status else 0}
+
+    def get_replicas(self, resource: str) -> Optional[int]:
+        status = self.get_replica_status(resource)
+        return None if status is None else status["desired"]
+
+    def _unknown_deployment_state(self, resource: str, why: str) -> bool:
+        """
+        The API call failed for a reason other than "not found" (timeout, throttling, ...). Do not cache that as
+        "missing": a transient error would make a healthy function look undeployed. Keep the last known answer,
+        or assume it exists so any real problem shows up as an invocation error instead.
+        """
+        print(f"[K8sService Warning] Could not read Deployment for {resource} ({why}); keeping last known state")
+        known = self._deployment_cache.get(resource)
+        return known[0] if known else True
+
     def has_deployment(self, resource: str) -> bool:
         """
         Checks whether the Deployment for a function exists in Kubernetes.
@@ -232,9 +256,13 @@ class K8sService:
             self.apps_v1.read_namespaced_deployment(name=app_label, namespace=namespace)
             self._deployment_cache[resource] = (True, now)
             return True
-        except Exception:
-            self._deployment_cache[resource] = (False, now)
-            return False
+        except ApiException as e:
+            if e.status == 404:
+                self._deployment_cache[resource] = (False, now)
+                return False
+            return self._unknown_deployment_state(resource, f"HTTP {e.status}")
+        except Exception as e:
+            return self._unknown_deployment_state(resource, type(e).__name__)
 
     def invoke_function(self, resource: str, payload: dict, timeout_seconds: float = 10.0) -> Dict[str, Any]:
         """
