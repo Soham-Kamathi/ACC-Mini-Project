@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
-import { KeyRound, Copy, RotateCw, Trash2, Plus } from 'lucide-react';
+import { KeyRound, Copy, RotateCw, Trash2, Plus, Check, ShieldAlert, Code2, Sparkles } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
 
@@ -54,7 +54,7 @@ export default function ApiAccessPanel({ fnName, publicId, token }: Props) {
   const copy = (text: string, id: string) => {
     navigator.clipboard?.writeText(text);
     setCopied(id);
-    setTimeout(() => setCopied(''), 1500);
+    setTimeout(() => setCopied(''), 2000);
   };
 
   const create = async () => {
@@ -100,102 +100,245 @@ export default function ApiAccessPanel({ fnName, publicId, token }: Props) {
   if (!fnName) return null;
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 mt-6">
-      <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-        <KeyRound className="w-5 h-5 text-amber-400" /> API Access for <span className="font-mono">{fnName}</span>
-      </h2>
-      <p className="text-xs text-slate-400">
-        Call this function from your own apps with an API key. A key works for this function only, and can optionally be pinned to one version.
-      </p>
-
-      <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 flex items-center justify-between gap-2">
-        <span className="break-all">POST {endpoint}</span>
-        <button onClick={() => copy(endpoint, 'endpoint')} className="text-blue-400 hover:text-blue-300 shrink-0" title="Copy endpoint">
-          {copied === 'endpoint' ? <span className="text-[10px]">Copied</span> : <Copy className="w-4 h-4" />}
-        </button>
+    <div className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-sm space-y-6 mt-6 transition-all">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200/60 flex items-center justify-center text-amber-600 shadow-sm">
+            <KeyRound className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base font-bold text-slate-900">API Access & Public Endpoints</h2>
+              <span className="font-mono text-xs px-2.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200/60 font-semibold">
+                {fnName}
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Securely invoke this function from microservices, webhooks, or external applications with scoped API keys.
+            </p>
+          </div>
+        </div>
       </div>
 
+      {/* Endpoint URL Pill */}
+      <div className="space-y-1.5">
+        <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+          <span>Public HTTPS Invocation Target</span>
+        </div>
+        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-slate-800 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 overflow-hidden text-ellipsis whitespace-nowrap">
+            <span className="px-2 py-0.5 bg-indigo-600 text-white rounded font-bold text-[10px] tracking-wide shrink-0">
+              POST
+            </span>
+            <span className="font-medium text-slate-700 break-all select-all">{endpoint}</span>
+          </div>
+          <button
+            onClick={() => copy(endpoint, 'endpoint')}
+            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg shadow-2xs transition-colors shrink-0 cursor-pointer"
+            title="Copy endpoint"
+          >
+            {copied === 'endpoint' ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="text-emerald-600 font-semibold text-[11px]">Copied</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-[11px]">Copy URL</span>
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* New Key Alert Banner */}
       {newKey && (
-        <div className="p-3 bg-amber-500/10 border border-amber-500/40 rounded-lg space-y-2">
-          <div className="text-xs font-semibold text-amber-300">Copy this key now. It will not be shown again.</div>
+        <div className="p-4 bg-amber-50/90 border border-amber-300 rounded-xl space-y-2.5 shadow-sm animate-in fade-in duration-200">
+          <div className="flex items-center gap-2 text-xs font-semibold text-amber-900">
+            <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Copy your newly generated API key now. For security, it will not be displayed again.</span>
+          </div>
           <div className="flex items-center gap-2">
-            <code className="flex-1 break-all text-xs text-amber-100 bg-slate-950 p-2 rounded">{newKey}</code>
-            <button onClick={() => copy(newKey, 'key')} className="px-2.5 py-1.5 text-xs bg-amber-600 hover:bg-amber-500 text-white rounded">
-              {copied === 'key' ? 'Copied' : 'Copy'}
+            <code className="flex-1 break-all text-xs text-amber-950 bg-white border border-amber-200 p-2.5 rounded-lg font-mono font-medium shadow-2xs select-all">
+              {newKey}
+            </code>
+            <button
+              onClick={() => copy(newKey, 'key')}
+              className="px-3 py-2 text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white rounded-lg shadow-sm transition flex items-center gap-1.5 shrink-0 cursor-pointer"
+            >
+              {copied === 'key' ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Copied!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy Key</span>
+                </>
+              )}
             </button>
           </div>
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2 items-end">
-        <div>
-          <label className="block text-[10px] uppercase tracking-wider text-slate-400 mb-1">Label</label>
-          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="mobile app"
-            className="px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
+      {/* Create Key Controls */}
+      <div className="bg-slate-50/70 border border-slate-200/80 rounded-xl p-4">
+        <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+          <span>Provision New Scoped Key</span>
         </div>
-        <div>
-          <label className="block text-[10px] uppercase tracking-wider text-slate-400 mb-1">Pin to version (optional)</label>
-          <input value={pinVersion} onChange={(e) => setPinVersion(e.target.value)} placeholder="v1"
-            className="w-32 px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
+        <div className="flex flex-wrap gap-3 items-end">
+          <div className="flex-1 min-w-[180px]">
+            <label className="block text-[11px] font-medium text-slate-600 mb-1">Key Description / Label</label>
+            <input
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="e.g. mobile-production, stripe-webhook"
+              className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-lg text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
+            />
+          </div>
+          <div className="w-full sm:w-44">
+            <label className="block text-[11px] font-medium text-slate-600 mb-1">Pin Version (Optional)</label>
+            <input
+              value={pinVersion}
+              onChange={(e) => setPinVersion(e.target.value)}
+              placeholder="e.g. v1 (blank = latest)"
+              className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-lg text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
+            />
+          </div>
+          <button
+            onClick={create}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-sm hover:shadow transition flex items-center gap-1.5 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" /> Generate Key
+          </button>
         </div>
-        <button onClick={create} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg flex items-center gap-1.5">
-          <Plus className="w-4 h-4" /> Create API key
-        </button>
+
+        {error && (
+          <div className="mt-3 text-xs text-rose-600 font-medium bg-rose-50 border border-rose-200 rounded-lg p-2.5 flex items-center gap-2">
+            <span>{error}</span>
+          </div>
+        )}
       </div>
 
-      {error && <div className="text-xs text-red-400">{error}</div>}
+      {/* Keys Table */}
+      <div>
+        <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2">
+          Active Key Credentials ({keys.length})
+        </div>
+        <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white shadow-2xs">
+          <table className="w-full text-left text-xs text-slate-700">
+            <thead className="bg-slate-50/90 text-slate-600 uppercase text-[10px] font-bold border-b border-slate-200 tracking-wider">
+              <tr>
+                <th className="px-4 py-3">Key Prefix</th>
+                <th className="px-4 py-3">Label</th>
+                <th className="px-4 py-3">Target Version</th>
+                <th className="px-4 py-3">Last Active</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {keys.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-6 text-center text-slate-400 font-medium">
+                    No API keys created yet for this function.
+                  </td>
+                </tr>
+              ) : (
+                keys.map((k) => (
+                  <tr key={k.id} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="px-4 py-3 font-mono font-medium text-slate-900">{k.key_prefix}••••••••</td>
+                    <td className="px-4 py-3 font-medium text-slate-800">{k.label}</td>
+                    <td className="px-4 py-3">
+                      <span className="font-mono px-2 py-0.5 rounded text-[11px] bg-slate-100 text-slate-700 border border-slate-200">
+                        {k.version_tag || 'latest'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-slate-500">
+                      {k.last_used_at ? new Date(k.last_used_at + 'Z').toLocaleString() : 'Never used'}
+                    </td>
+                    <td className="px-4 py-3">
+                      {k.revoked ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                          Revoked
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          Active
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                      {!k.revoked && (
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => rotate(k.id)}
+                            className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                            title="Rotate Key"
+                          >
+                            <RotateCw className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => revoke(k.id)}
+                            className="p-1.5 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                            title="Revoke Key"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs text-slate-300">
-          <thead className="text-slate-400 uppercase text-[10px] border-b border-slate-800">
-            <tr>
-              <th className="p-2">Key</th>
-              <th className="p-2">Label</th>
-              <th className="p-2">Version</th>
-              <th className="p-2">Last used</th>
-              <th className="p-2">Status</th>
-              <th className="p-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {keys.length === 0 && (
-              <tr><td colSpan={6} className="p-3 text-slate-500">No API keys yet.</td></tr>
-            )}
-            {keys.map(k => (
-              <tr key={k.id} className="border-b border-slate-800/60">
-                <td className="p-2 font-mono">{k.key_prefix}…</td>
-                <td className="p-2">{k.label}</td>
-                <td className="p-2">{k.version_tag || 'latest'}</td>
-                <td className="p-2">{k.last_used_at ? new Date(k.last_used_at + 'Z').toLocaleString() : 'never'}</td>
-                <td className="p-2">{k.revoked ? <span className="text-red-400">revoked</span> : <span className="text-emerald-400">active</span>}</td>
-                <td className="p-2 text-right whitespace-nowrap">
-                  {!k.revoked && (
+      {/* Code Examples */}
+      <div>
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2">
+          <Code2 className="w-3.5 h-3.5 text-slate-500" />
+          <span>Integration Code Samples</span>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {[
+            ['cURL (Terminal)', curl],
+            ['Python (Requests)', python],
+          ].map(([title, code]) => (
+            <div key={title} className="relative rounded-xl border border-slate-800 bg-slate-900 overflow-hidden shadow-sm">
+              <div className="px-4 py-2 bg-slate-950/80 border-b border-slate-800 flex items-center justify-between">
+                <span className="text-[11px] font-mono font-medium text-slate-300">{title}</span>
+                <button
+                  onClick={() => copy(code, title)}
+                  className="flex items-center gap-1 text-[11px] text-slate-400 hover:text-white transition cursor-pointer"
+                  title="Copy code snippet"
+                >
+                  {copied === title ? (
                     <>
-                      <button onClick={() => rotate(k.id)} className="text-slate-400 hover:text-blue-400 mr-3" title="Rotate">
-                        <RotateCw className="w-4 h-4 inline" />
-                      </button>
-                      <button onClick={() => revoke(k.id)} className="text-slate-400 hover:text-red-400" title="Revoke">
-                        <Trash2 className="w-4 h-4 inline" />
-                      </button>
+                      <Check className="w-3 h-3 text-emerald-400" />
+                      <span className="text-emerald-400 font-medium">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
                     </>
                   )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        {[['curl', curl], ['Python', python]].map(([title, code]) => (
-          <div key={title} className="relative">
-            <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">{title}</div>
-            <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-[11px] text-slate-200 overflow-x-auto">{code}</pre>
-            <button onClick={() => copy(code, title)} className="absolute top-5 right-2 text-slate-400 hover:text-blue-400" title="Copy">
-              {copied === title ? <span className="text-[10px]">Copied</span> : <Copy className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-        ))}
+                </button>
+              </div>
+              <pre className="p-4 text-[11px] text-emerald-300 font-mono overflow-x-auto leading-relaxed selection:bg-slate-700">
+                {code}
+              </pre>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
