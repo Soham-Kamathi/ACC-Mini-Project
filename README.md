@@ -15,8 +15,10 @@ A self-hosted **Function-as-a-Service (FaaS)** execution platform that allows de
 5. **Cold vs. Warm Latency Telemetry**: Real-time breakdown of container startup latency vs. function execution time.
 6. **Kubernetes Orchestration**: Programmatic Deployment, ClusterIP Service, and Pod management with CPU/memory limits (`256Mi`, `500m`), security context (`runAsNonRoot=True`), and readiness probes (`/healthz`).
 7. **Observability**: Prometheus metrics exporter (`/api/v1/metrics`) tracking invocations, cold starts, and latency percentiles.
-8. **Interactive Web Dashboard**: React + Vite + Tailwind CSS UI for cataloging functions, writing code, testing endpoints, and viewing logs.
-9. **Scientific Evaluation Suite**: Automated benchmarking scripts for Cold Start (Exp 1), Concurrency & Throughput (Exp 2), and Replica Scaling (Exp 3).
+8. **Interactive Web Dashboard**: Modern React + Vite UI with dynamic integration code samples, live cold-start metrics, and cluster telemetry.
+9. **Public Invocations & Scoped API Keys**: Stable endpoints (`POST /api/v1/f/{public_id}`) guarded by SHA-256 hashed API keys (`X-API-Key`), rate limiting, version pinning, and payload size verification.
+10. **Public Internet Access via Tunnels**: Built-in support for Ngrok/Cloudflare tunnels with permanent domains, allowing any external device or webhook to invoke functions.
+11. **Scientific Evaluation Suite**: Automated benchmarking scripts for Cold Start (Exp 1), Concurrency & Throughput (Exp 2), and Replica Scaling (Exp 3).
 
 ---
 
@@ -26,11 +28,11 @@ A self-hosted **Function-as-a-Service (FaaS)** execution platform that allows de
 ACC Mini Project/
 ├── backend/                  # FastAPI Application & FaaS Controller
 │   ├── app/
-│   │   ├── api/              # REST Endpoints (auth, functions, invoke, logs, metrics, cluster)
+│   │   ├── api/              # REST Endpoints (auth, functions, invoke, keys, logs, metrics, cluster)
 │   │   ├── core/             # Settings, DB session, Security & JWT
-│   │   ├── models/           # SQLAlchemy DB Models (User, Function, Version, InvocationLog)
+│   │   ├── models/           # SQLAlchemy DB Models (User, Function, Version, ApiKey, InvocationLog)
 │   │   ├── schemas/          # Pydantic Schemas (Request/Response)
-│   │   ├── services/         # BuilderService, K8sService, FaasController, RouterService
+│   │   ├── services/         # BuilderService, K8sService, FaasController, RouterService, Autoscaler
 │   │   └── main.py           # FastAPI entry point & lifespan daemon
 │   ├── runtimes/             # Base Runtime Templates
 │   │   └── python311/        # Python 3.11 Dockerfile.template + server.py wrapper
@@ -39,8 +41,10 @@ ACC Mini Project/
 ├── frontend/                 # React + Vite + Tailwind CSS Web Dashboard
 │   ├── src/
 │   │   ├── App.tsx           # Full-featured FaaS management UI
+│   │   ├── ApiAccessPanel.tsx# Scoped API key management & dynamic integration snippets
 │   │   ├── main.tsx          # React DOM entry
-│   │   └── index.css         # Tailwind styles
+│   │   └── index.css         # Tailwind styles & design system
+│   ├── vite.config.ts        # Vite configuration with proxy & tunnel host permissions
 │   └── package.json
 ├── k8s/                      # Kubernetes Manifests
 │   ├── namespace.yaml        # faas-fn & faas-system namespaces
@@ -48,7 +52,8 @@ ACC Mini Project/
 │   └── registry.yaml         # In-cluster Docker registry
 ├── benchmarks/               # Scientific Performance Benchmark Suite
 │   ├── cold_start_test.py    # Experiment 1: Cold vs Warm start latency
-│   └── concurrency_test.py   # Experiment 2: Concurrent load & throughput
+│   ├── concurrency_test.py   # Experiment 2: Concurrent load & throughput
+│   └── scaling_test.py       # Experiment 3: Replica scaling & autoscaling
 ├── docker-compose.yml        # Local PostgreSQL & Docker Registry
 └── README.md
 ```
@@ -59,6 +64,9 @@ ACC Mini Project/
 
 - **Authentication on invoke**: `POST /api/v1/invoke/{name}[/{version}]` requires a `Bearer` JWT. Functions are looked up by `(owner, name)`, so two users can both own a function called `hello` without colliding.
 - **Per-version Deployments**: each function version is deployed as its own Deployment/Service named `fn-<owner_id>-<name>-<version>` (all labelled `faas-function=<owner_id>-<name>`). `/invoke/{name}/v1` really runs v1; `/invoke/{name}` runs the newest version that has finished building. Function names must be DNS-1123 labels (max 30 chars).
+- **Public API Keys & Invocations**: Functions can be invoked externally via `POST /api/v1/f/{public_id}` without exposing account credentials. Keys are stored as SHA-256 hashes, displayed only once upon generation, support optional version pinning, and enforce a 120 req/min rate limit per key.
+- **Payload Guardrails**: The API gateway automatically enforces a payload size limit (default 1 MB) to protect against denial-of-service attempts.
+- **Pod Security Hardening**: Function containers run with `readOnlyRootFilesystem=True`, `runAsNonRoot=True`, `runAsUser=10001`, dropped Linux capabilities (`drop=["ALL"]`), and disabled Kubernetes ServiceAccount tokens.
 - **No in-process execution by default**: user code only ever runs inside a Pod. The old `exec()` fallback is disabled; set `ALLOW_LOCAL_SANDBOX=true` for local development without a cluster (**unsafe: arbitrary code execution inside the API process**). Every invocation response and log row carries `executed_on` (`k8s`, `sandbox` or `none`).
 
 ## Autoscaling
@@ -81,7 +89,29 @@ The controller's autoscaler measures the number of requests in flight per functi
 
 ## Quick Start Guide
 
-### 1. Enable Kubernetes on Docker Desktop
+### 🚀 One-Click Startup (Recommended for Peers & Collaborators)
+
+If you just cloned the repository, you can launch the entire stack (Postgres, Registry, FastAPI Backend, Vite Frontend, and Tunnel) in one step:
+
+- **Windows Double-Click**: Double-click `start-all.bat`
+- **PowerShell**:
+  ```powershell
+  .\start-all.ps1 -Tunnel
+  ```
+
+The launcher will automatically:
+1. Verify Docker Desktop is active.
+2. Initialize `.env` from `.env.example` if not already created.
+3. Start the Docker containers (`docker compose up -d`).
+4. Install dependencies and start the FastAPI backend on port `8000`.
+5. Install dependencies and start the Vite frontend on port `5173`.
+6. Launch the public tunnel so you and your peers can access the platform.
+
+---
+
+### Manual Step-by-Step Setup
+
+#### 1. Enable Kubernetes on Docker Desktop
 
 1. Open **Docker Desktop**.
 2. Click the **Settings (Gear icon)** $\rightarrow$ **Kubernetes**.
@@ -119,6 +149,68 @@ npm run dev
 ```
 
 - Dashboard UI: [http://localhost:5173](http://localhost:5173)
+
+### 5. Expose Platform Publicly (Ngrok Tunneling)
+
+To let other devices on the internet access your dashboard and invoke functions with permanent URLs:
+
+1. Claim a free permanent static domain on [dashboard.ngrok.com/cloud-edge/domains](https://dashboard.ngrok.com/cloud-edge/domains).
+2. Configure your ngrok auth token:
+   ```powershell
+   ngrok config add-authtoken <YOUR_AUTHTOKEN>
+   ```
+3. Start the tunnel forwarding to Vite (port `5173`):
+   ```powershell
+   ngrok http 5173 --domain=YOUR-DOMAIN.ngrok-free.dev
+   ```
+   *(Vite serves the UI and automatically proxies `/api/*` to the FastAPI backend, giving you a unified public domain for both the dashboard and function endpoints)*.
+
+---
+
+## Public Invocations & Integration
+
+Each deployed function provides an obfuscated public invocation endpoint:
+
+```text
+POST https://<your-domain>/api/v1/f/<public_id>
+```
+
+### 1. Generating API Keys
+In the dashboard under **Invocation Console** $\rightarrow$ **API Access & Public Endpoints**, generate a scoped API Key (e.g. `fk_...`). Keys can be labeled, rotated, revoked, and optionally pinned to a specific version.
+
+### 2. Calling from External Devices & Applications
+
+#### cURL (Terminal)
+```bash
+curl -X POST https://<your-domain>/api/v1/f/<public_id> \
+  -H "X-API-Key: <your_api_key>" \
+  -H "ngrok-skip-browser-warning: true" \
+  -H "Content-Type: application/json" \
+  -d '{"n": 20}'
+```
+
+#### Python (Requests)
+```python
+import requests
+
+resp = requests.post(
+    "https://<your-domain>/api/v1/f/<public_id>",
+    headers={
+        "X-API-Key": "<your_api_key>",
+        "ngrok-skip-browser-warning": "true",
+    },
+    json={"n": 20},
+)
+data = resp.json()
+print("Result:", data.get("result", data))
+```
+
+> **Note on Ngrok Interstitial**: The header `ngrok-skip-browser-warning: true` bypasses ngrok's free tier HTML warning page, ensuring programmatic requests directly receive JSON responses.
+
+### 3. Dynamic Code Snippets in Dashboard
+The dashboard's **Integration Code Samples** panel automatically:
+- Formats the cURL and Python snippets in real time based on the active function and whatever JSON payload is currently typed into the **Event Input Payload** editor.
+- Populates the generated API key and the active public domain.
 
 ---
 

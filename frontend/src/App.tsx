@@ -235,13 +235,27 @@ export default function App() {
     if (!token) return;
     try {
       setLoading(true);
-      // A failed request must not wipe the screen: keep the last data we received and tell the user.
+      let isUnauthorized = false;
       const [fnRes, statsRes, logsRes, clusterRes] = await Promise.all([
-        axios.get(`${API_BASE}/functions/`, getHeaders()).catch(() => null),
-        axios.get(`${API_BASE}/stats`, getHeaders()).catch(() => null),
-        axios.get(`${API_BASE}/logs/recent`, getHeaders()).catch(() => null),
+        axios.get(`${API_BASE}/functions/`, getHeaders()).catch((err) => {
+          if (err.response?.status === 401) isUnauthorized = true;
+          return null;
+        }),
+        axios.get(`${API_BASE}/stats`, getHeaders()).catch((err) => {
+          if (err.response?.status === 401) isUnauthorized = true;
+          return null;
+        }),
+        axios.get(`${API_BASE}/logs/recent`, getHeaders()).catch((err) => {
+          if (err.response?.status === 401) isUnauthorized = true;
+          return null;
+        }),
         axios.get(`${API_BASE}/cluster/status`).catch(() => null)
       ]);
+
+      if (isUnauthorized) {
+        handleLogout();
+        return;
+      }
       setBackendBusy(!fnRes || !statsRes || !logsRes || !clusterRes);
       if (fnRes) setFunctions(fnRes.data || []);
       if (statsRes) setStats(statsRes.data || null);
@@ -1408,6 +1422,7 @@ export default function App() {
                 fnName={selectedFn}
                 publicId={functions.find(f => f.name === selectedFn)?.public_id}
                 token={token}
+                invokePayload={invokePayload}
               />
             )}
           </div>

@@ -18,9 +18,10 @@ interface Props {
   fnName: string;
   publicId?: string;
   token: string | null;
+  invokePayload?: string;
 }
 
-export default function ApiAccessPanel({ fnName, publicId, token }: Props) {
+export default function ApiAccessPanel({ fnName, publicId, token, invokePayload }: Props) {
   const [keys, setKeys] = useState<ApiKeyItem[]>([]);
   const [label, setLabel] = useState('');
   const [pinVersion, setPinVersion] = useState('');
@@ -94,8 +95,32 @@ export default function ApiAccessPanel({ fnName, publicId, token }: Props) {
   };
 
   const keyText = newKey ?? '<your_api_key>';
-  const curl = `curl -X POST ${endpoint} \\\n  -H "X-API-Key: ${keyText}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"name": "World"}'`;
-  const python = `import requests\n\nresp = requests.post(\n    "${endpoint}",\n    headers={"X-API-Key": "${keyText}"},\n    json={"name": "World"},\n)\nprint(resp.json()["result"])`;
+
+  let formattedJsonPayload: any = { name: "World" };
+  try {
+    if (invokePayload && invokePayload.trim()) {
+      formattedJsonPayload = JSON.parse(invokePayload.trim());
+    } else {
+      const lower = fnName.toLowerCase();
+      if (lower.includes('fib') || lower.includes('bench') || lower.includes('calc')) {
+        formattedJsonPayload = { n: 25 };
+      } else if (lower.includes('multiplier')) {
+        formattedJsonPayload = { a: 6, b: 7 };
+      } else if (lower.includes('double')) {
+        formattedJsonPayload = { x: 21 };
+      } else {
+        formattedJsonPayload = { name: "Developer" };
+      }
+    }
+  } catch {
+    formattedJsonPayload = { name: "Developer" };
+  }
+
+  const compactPayload = JSON.stringify(formattedJsonPayload);
+  const pythonPayloadIndent = JSON.stringify(formattedJsonPayload, null, 4).replace(/\n/g, '\n    ');
+
+  const curl = `curl -X POST ${endpoint} \\\n  -H "X-API-Key: ${keyText}" \\\n  -H "ngrok-skip-browser-warning: true" \\\n  -H "Content-Type: application/json" \\\n  -d '${compactPayload}'`;
+  const python = `import requests\n\nresp = requests.post(\n    "${endpoint}",\n    headers={\n        "X-API-Key": "${keyText}",\n        "ngrok-skip-browser-warning": "true"\n    },\n    json=${pythonPayloadIndent},\n)\nprint(resp.json().get("result", resp.json()))`;
 
   if (!fnName) return null;
 

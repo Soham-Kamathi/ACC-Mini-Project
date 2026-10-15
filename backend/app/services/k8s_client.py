@@ -298,7 +298,17 @@ class K8sService:
                     _preload_content=False,
                     _request_timeout=timeout_seconds
                 )
-                http_status, body = raw.status, raw.data
+                if isinstance(raw, tuple):
+                    resp_obj = raw[0]
+                    http_status = raw[1] if len(raw) > 1 else getattr(resp_obj, "status", 200)
+                    body = getattr(resp_obj, "data", None)
+                    if body is None and hasattr(resp_obj, "read"):
+                        body = resp_obj.read()
+                    elif body is None:
+                        body = resp_obj
+                else:
+                    http_status = getattr(raw, "status", 200)
+                    body = getattr(raw, "data", raw)
             except ApiException as e:
                 # the proxy relays the Pod's own non-2xx answers (504 timeout, 500 handler error) as ApiException
                 http_status, body = e.status, e.body
@@ -309,12 +319,12 @@ class K8sService:
             if not isinstance(data, dict):
                 data = {"result": data}
             inner_status = data.get("statusCode", http_status)
+            body_text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body) if body else ""
             return {
                 "status_code": inner_status,
                 "result": data.get("result"),
                 "execution_time_ms": data.get("execution_time_ms", 0.0),
-                "error": (data.get("error") or (body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)))
-                         if inner_status != 200 else None
+                "error": (data.get("error") or body_text) if inner_status != 200 else None
             }
 
     def get_function_endpoint(self, resource: str) -> str:
