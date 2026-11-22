@@ -52,6 +52,10 @@ def _add_missing_columns():
         ("functions", "min_replicas", "INTEGER NOT NULL DEFAULT 0"),
         ("functions", "max_replicas", "INTEGER NOT NULL DEFAULT 5"),
         ("functions", "target_concurrency", "INTEGER NOT NULL DEFAULT 5"),
+        ("function_versions", "build_duration_ms", "FLOAT DEFAULT 0.0"),
+        ("function_versions", "deploy_duration_ms", "FLOAT DEFAULT 0.0"),
+        ("function_versions", "status", "VARCHAR(32) DEFAULT 'READY'"),
+        ("function_versions", "status_message", "TEXT DEFAULT ''"),
     ]
     insp = inspect(engine)
     for table, column, ddl in additions:

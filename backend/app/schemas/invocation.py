@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 from datetime import datetime
 from typing import Optional, Any, Dict
 
@@ -34,3 +34,9 @@ class InvocationLogOut(BaseModel):
     payload_output: Optional[str] = ""
     error_message: Optional[str] = ""
     timestamp: datetime
+
+    @field_serializer("timestamp")
+    def serialize_timestamp(self, dt: datetime, _info):
+        if dt.tzinfo is None:
+            return dt.isoformat() + "Z"
+        return dt.isoformat()

@@ -12,6 +12,7 @@ from backend.app.api.keys import router as keys_router
 from backend.app.api.logs import router as logs_router
 from backend.app.api.metrics import router as metrics_router
 from backend.app.api.cluster import router as cluster_router
+from backend.app.api.observability import router as observability_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -64,6 +65,7 @@ app.include_router(keys_router, prefix=settings.API_V1_STR)
 app.include_router(logs_router, prefix=settings.API_V1_STR)
 app.include_router(metrics_router, prefix=settings.API_V1_STR)
 app.include_router(cluster_router, prefix=settings.API_V1_STR)
+app.include_router(observability_router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 def root():

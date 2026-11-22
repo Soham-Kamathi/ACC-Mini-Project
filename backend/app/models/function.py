@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
 from sqlalchemy.orm import relationship
 from backend.app.core.db import Base
 
@@ -40,6 +40,7 @@ class Function(Base):
     versions = relationship("FunctionVersion", back_populates="function", cascade="all, delete-orphan")
     invocations = relationship("InvocationLog", back_populates="function", cascade="all, delete-orphan")
     api_keys = relationship("ApiKey", back_populates="function", cascade="all, delete-orphan")
+    scaling_events = relationship("ScalingEvent", back_populates="function", cascade="all, delete-orphan")
 
 class FunctionVersion(Base):
     __tablename__ = "function_versions"
@@ -51,6 +52,24 @@ class FunctionVersion(Base):
     requirements = Column(Text, default="")
     image_tag = Column(String(256), nullable=False)
     is_active = Column(Boolean, default=True)
+    build_duration_ms = Column(Float, default=0.0)
+    deploy_duration_ms = Column(Float, default=0.0)
+    status = Column(String(32), default="READY")  # BUILDING, READY, FAILED
+    status_message = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     function = relationship("Function", back_populates="versions")
+
+class ScalingEvent(Base):
+    __tablename__ = "scaling_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    function_id = Column(Integer, ForeignKey("functions.id"), nullable=False, index=True)
+    function_name = Column(String(64), nullable=False)
+    from_replicas = Column(Integer, default=0)
+    to_replicas = Column(Integer, default=0)
+    direction = Column(String(16), nullable=False)  # "UP" or "DOWN"
+    reason = Column(String(256), default="")
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+
+    function = relationship("Function", back_populates="scaling_events")

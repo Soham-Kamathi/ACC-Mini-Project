@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import axios from 'axios';
 import ApiAccessPanel from './ApiAccessPanel';
+import ObservabilityView from './ObservabilityView';
 import { 
   Server, Play, Plus, RefreshCw, Trash2, Clock, Cpu, 
   Database, Activity, Zap, CheckCircle2, AlertCircle, 
   Terminal, BarChart3, Code2, Layers, ShieldCheck, Box,
   Search, ArrowRight, ExternalLink, LogOut, User, Copy,
   Check, Sparkles, Filter, Info, Shield, Radio, Flame,
-  Gauge, Sliders, ChevronRight, PlayCircle, HardDrive,
+  Gauge, Sliders, ChevronRight, ChevronDown, PlayCircle, HardDrive,
   FileCode, Cpu as CpuIcon
 } from 'lucide-react';
 
@@ -94,6 +95,147 @@ const TEMPLATES = {
         "total_filtered": len(filtered),
         "results": filtered
     }`
+  },
+  code_executor: {
+    name: 'python-code-executor',
+    desc: 'Executes submitted Python code with stdin/stdout capture (Code-as-a-Service)',
+    code: `import os
+import uuid
+import time
+import shutil
+import subprocess
+import threading
+
+MAX_CODE_BYTES       = 64 * 1024
+MAX_STDIN_BYTES      = 1 * 1024 * 1024
+MAX_STDOUT_BYTES     = 1 * 1024 * 1024
+MAX_STDERR_BYTES     = 256 * 1024
+MIN_TIMEOUT          = 1
+MAX_TIMEOUT          = 30
+DEFAULT_TIMEOUT      = 5
+MAX_CONCURRENT       = int(os.getenv("CODE_EXEC_MAX_CONCURRENT", "10"))
+SUPPORTED_LANGUAGES  = {"python"}
+
+_semaphore = threading.Semaphore(MAX_CONCURRENT)
+
+_SECRET_ENV_KEYS = {
+    "SECRET_KEY", "DATABASE_URL", "DOCKER_REGISTRY", "DOCKER_SOCKET",
+    "K8S_NAMESPACE", "K8S_IN_CLUSTER", "ALLOW_LOCAL_SANDBOX",
+    "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
+    "NGROK_AUTHTOKEN", "NGROK_DOMAIN",
+}
+
+def _clean_env():
+    env = {}
+    for key, val in os.environ.items():
+        if key.upper() in _SECRET_ENV_KEYS:
+            continue
+        env[key] = val
+    if "PATH" not in env:
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+def _truncate(data, limit):
+    if len(data) <= limit:
+        return data.decode("utf-8", errors="replace"), False
+    return data[:limit].decode("utf-8", errors="replace"), True
+
+def _error(status, message):
+    return {
+        "status": status, "exit_code": None,
+        "stdout": "", "stderr": message,
+        "execution_time_ms": 0.0, "timed_out": False,
+        "stdout_truncated": False, "stderr_truncated": False,
+    }
+
+def handler(event):
+    if not isinstance(event, dict):
+        return _error("invalid_request", "Event must be a JSON object")
+
+    language = event.get("language", "").strip().lower()
+    code     = event.get("code", "")
+    stdin    = event.get("stdin", "")
+    timeout  = event.get("timeout_seconds", DEFAULT_TIMEOUT)
+
+    if not language:
+        return _error("invalid_request", "Missing required field: language")
+    if language not in SUPPORTED_LANGUAGES:
+        return _error("invalid_request", f"Unsupported language '{language}'.")
+    if not code or not isinstance(code, str):
+        return _error("invalid_request", "Missing or empty required field: code")
+    if len(code.encode("utf-8", errors="replace")) > MAX_CODE_BYTES:
+        return _error("invalid_request", f"Source code exceeds {MAX_CODE_BYTES // 1024} KB")
+    if not isinstance(stdin, str):
+        stdin = str(stdin)
+    if len(stdin.encode("utf-8", errors="replace")) > MAX_STDIN_BYTES:
+        return _error("invalid_request", f"stdin exceeds {MAX_STDIN_BYTES // (1024*1024)} MB")
+
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        timeout = DEFAULT_TIMEOUT
+    timeout = max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout))
+
+    acquired = _semaphore.acquire(timeout=2)
+    if not acquired:
+        return _error("invalid_request", "Execution capacity exhausted. Retry shortly.")
+
+    exec_dir = None
+    try:
+        exec_id  = uuid.uuid4().hex[:12]
+        exec_dir = os.path.join("/tmp", f"exec_{exec_id}")
+        os.makedirs(exec_dir, exist_ok=True)
+
+        main_py = os.path.join(exec_dir, "main.py")
+        with open(main_py, "w", encoding="utf-8") as f:
+            f.write(code)
+
+        stdin_bytes = stdin.encode("utf-8", errors="replace")
+        env = _clean_env()
+
+        t0 = time.perf_counter()
+        try:
+            proc = subprocess.run(
+                ["python3", "-u", main_py],
+                input=stdin_bytes, capture_output=True,
+                timeout=timeout, cwd=exec_dir, env=env,
+            )
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            timed_out = False
+        except subprocess.TimeoutExpired as exc:
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            so, so_t = _truncate(exc.stdout or b"", MAX_STDOUT_BYTES)
+            se, se_t = _truncate(exc.stderr or b"", MAX_STDERR_BYTES)
+            return {"status": "time_limit_exceeded", "exit_code": None,
+                    "stdout": so, "stderr": se,
+                    "execution_time_ms": round(elapsed_ms, 2),
+                    "timed_out": True,
+                    "stdout_truncated": so_t, "stderr_truncated": se_t}
+
+        so, so_t = _truncate(proc.stdout, MAX_STDOUT_BYTES)
+        se, se_t = _truncate(proc.stderr, MAX_STDERR_BYTES)
+        status = "success" if proc.returncode == 0 else "runtime_error"
+        if proc.returncode and proc.returncode < 0:
+            sig = -proc.returncode
+            if sig == 9:
+                status = "memory_limit_exceeded"
+                se += f"\\n[Killed by signal {sig}]"
+            else:
+                se += f"\\n[Killed by signal {sig}]"
+
+        return {"status": status, "exit_code": proc.returncode,
+                "stdout": so, "stderr": se,
+                "execution_time_ms": round(elapsed_ms, 2),
+                "timed_out": timed_out,
+                "stdout_truncated": so_t, "stderr_truncated": se_t}
+    except Exception as exc:
+        return _error("runtime_error", f"Infrastructure error: {str(exc)}")
+    finally:
+        if exec_dir and os.path.isdir(exec_dir):
+            shutil.rmtree(exec_dir, ignore_errors=True)
+        _semaphore.release()`
   }
 };
 
@@ -114,11 +256,15 @@ const getSamplePayload = (fnName: string): string => {
   if (name.includes('transform')) {
     return '{\n  "items": [\n    {"id": 1, "score": 85},\n    {"id": 2, "score": 30}\n  ]\n}';
   }
+  if (name.includes('executor') || name.includes('code-exec')) {
+    return '{\n  "language": "python",\n  "code": "a, b = map(int, input().split())\\nprint(a + b)",\n  "stdin": "10 20",\n  "timeout_seconds": 5\n}';
+  }
   return '{\n  "name": "Cloud Engineer"\n}';
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'catalog' | 'create' | 'invoke' | 'logs' | 'cluster'>('catalog');
+  const [activeTab, setActiveTab] = useState<'catalog' | 'create' | 'invoke' | 'logs' | 'cluster' | 'observability'>('catalog');
+  const [selectedObsFn, setSelectedObsFn] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('faas_token'));
   const [username, setUsername] = useState<string>(localStorage.getItem('faas_username') || '');
   
@@ -163,6 +309,44 @@ export default function App() {
   const [copiedOutput, setCopiedOutput] = useState(false);
   const selectedFnRef = useRef<string>('');
   selectedFnRef.current = selectedFn;
+
+  // Log Expand & Payload State
+  const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
+  const [copiedLogField, setCopiedLogField] = useState<string | null>(null);
+
+  const formatPayload = (raw: string | null | undefined): string => {
+    if (!raw || !raw.trim()) return '';
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === 'string') {
+        try {
+          const doubleParsed = JSON.parse(parsed);
+          return JSON.stringify(doubleParsed, null, 2);
+        } catch {
+          return parsed;
+        }
+      }
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return raw;
+    }
+  };
+
+  const formatTime = (ts: string | null | undefined): string => {
+    if (!ts) return '-';
+    const str = String(ts).trim();
+    const iso = (str.includes('Z') || /[+-]\d{2}:\d{2}$/.test(str)) ? str : `${str.replace(' ', 'T')}Z`;
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? str : d.toLocaleTimeString();
+  };
+
+  const formatDateTime = (ts: string | null | undefined): string => {
+    if (!ts) return '-';
+    const str = String(ts).trim();
+    const iso = (str.includes('Z') || /[+-]\d{2}:\d{2}$/.test(str)) ? str : `${str.replace(' ', 'T')}Z`;
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? str : d.toLocaleString();
+  };
 
   // Setup Axios Header
   const getHeaders = () => ({
@@ -761,6 +945,21 @@ export default function App() {
             <BarChart3 className="w-4 h-4" />
             <span>Cluster & Telemetry</span>
           </button>
+
+          <button
+            onClick={() => {
+              setSelectedObsFn(null);
+              setActiveTab('observability');
+            }}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap cursor-pointer ${
+              activeTab === 'observability'
+                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/20'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
+            }`}
+          >
+            <Activity className="w-4 h-4 text-emerald-400" />
+            <span>Observability</span>
+          </button>
         </div>
 
         {/* Tab 1: Catalog */}
@@ -909,18 +1108,32 @@ export default function App() {
 
                     {/* Actions */}
                     <div className="flex items-center justify-between pt-3 border-t border-slate-100">
-                      <button
-                        onClick={() => {
-                          selectedFnRef.current = fn.name;
-                          setSelectedFn(fn.name);
-                          setInvokePayload(getSamplePayload(fn.name));
-                          setActiveTab('invoke');
-                        }}
-                        className="px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/70 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <Play className="w-3.5 h-3.5" />
-                        <span>Test & Invoke</span>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            selectedFnRef.current = fn.name;
+                            setSelectedFn(fn.name);
+                            setInvokePayload(getSamplePayload(fn.name));
+                            setActiveTab('invoke');
+                          }}
+                          className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/70 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          <span>Test & Invoke</span>
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setSelectedObsFn(fn.public_id);
+                            setActiveTab('observability');
+                          }}
+                          className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+                          title="Inspect deep function telemetry & percentiles"
+                        >
+                          <Activity className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>Metrics</span>
+                        </button>
+                      </div>
 
                       <button
                         onClick={() => handleDelete(fn.name)}
@@ -969,7 +1182,7 @@ export default function App() {
               <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-2.5">
                 Quick Starter Templates
               </label>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 {Object.entries(TEMPLATES).map(([key, t]) => (
                   <button
                     key={key}
@@ -1435,7 +1648,7 @@ export default function App() {
               <div>
                 <h2 className="text-lg font-bold text-slate-900 tracking-tight">Live Invocation Telemetry Logs</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Historical execution records with granular cold-start durations, pod metrics, and HTTP response codes.
+                  Historical execution records with granular cold-start durations, pod metrics, and HTTP response codes. Click any row to inspect incoming request JSON & output.
                 </p>
               </div>
               <button
@@ -1468,36 +1681,163 @@ export default function App() {
                       </td>
                     </tr>
                   ) : (
-                    logs.map((log) => (
-                      <tr key={log.id} className="hover:bg-slate-50/70 transition-colors">
-                        <td className="px-4 py-3 font-sans text-slate-600 font-medium">
-                          {new Date(log.timestamp).toLocaleTimeString()}
-                        </td>
-                        <td className="px-4 py-3 text-slate-800 font-semibold">{log.request_id.slice(0, 8)}...</td>
-                        <td className="px-4 py-3 font-sans">
-                          <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
-                            log.is_cold_start 
-                              ? 'bg-amber-50 text-amber-700 border-amber-200' 
-                              : 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                          }`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${log.is_cold_start ? 'bg-amber-500' : 'bg-emerald-500'}`} />
-                            {log.is_cold_start ? 'COLD' : 'WARM'}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-amber-600 font-semibold">{log.cold_start_duration_ms} ms</td>
-                        <td className="px-4 py-3 text-emerald-600 font-semibold">{log.execution_duration_ms} ms</td>
-                        <td className="px-4 py-3 text-slate-900 font-bold">{log.total_duration_ms} ms</td>
-                        <td className="px-4 py-3 font-sans">
-                          <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-bold ${
-                            log.status_code === 200 
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
-                              : 'bg-rose-50 text-rose-700 border border-rose-200'
-                          }`}>
-                            {log.status_code}
-                          </span>
-                        </td>
-                      </tr>
-                    ))
+                    logs.map((log) => {
+                      const isExpanded = expandedLogId === log.id;
+                      return (
+                        <React.Fragment key={log.id}>
+                          <tr 
+                            onClick={() => setExpandedLogId(isExpanded ? null : log.id)}
+                            className={`cursor-pointer transition-colors ${
+                              isExpanded ? 'bg-indigo-50/60 hover:bg-indigo-50/80' : 'hover:bg-slate-50/80'
+                            }`}
+                            title="Click to view incoming request JSON and execution output"
+                          >
+                            <td className="px-4 py-3 font-sans text-slate-600 font-medium">
+                              {formatTime(log.timestamp)}
+                            </td>
+                            <td className="px-4 py-3 text-slate-800 font-semibold">
+                              <div className="flex items-center gap-1.5">
+                                <ChevronRight className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${
+                                  isExpanded ? 'rotate-90 text-indigo-600' : ''
+                                }`} />
+                                <span>{log.request_id.slice(0, 8)}...</span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 font-sans">
+                              <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
+                                log.is_cold_start 
+                                  ? 'bg-amber-50 text-amber-700 border-amber-200' 
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              }`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${log.is_cold_start ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                                {log.is_cold_start ? 'COLD' : 'WARM'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-amber-600 font-semibold">{log.cold_start_duration_ms} ms</td>
+                            <td className="px-4 py-3 text-emerald-600 font-semibold">{log.execution_duration_ms} ms</td>
+                            <td className="px-4 py-3 text-slate-900 font-bold">{log.total_duration_ms} ms</td>
+                            <td className="px-4 py-3 font-sans">
+                              <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-bold ${
+                                log.status_code === 200 
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                                  : 'bg-rose-50 text-rose-700 border border-rose-200'
+                              }`}>
+                                {log.status_code}
+                              </span>
+                            </td>
+                          </tr>
+
+                          {/* Expanded Details Row */}
+                          {isExpanded && (
+                            <tr className="bg-slate-900 border-y border-slate-800">
+                              <td colSpan={7} className="p-4 sm:p-5">
+                                <div className="space-y-4">
+                                  {/* Header Info */}
+                                  <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800 text-xs">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-mono text-slate-400">Request ID:</span>
+                                      <span className="font-mono font-semibold text-slate-200 select-all">{log.request_id}</span>
+                                      <span className="text-slate-500">•</span>
+                                      <span className="text-slate-400">{formatDateTime(log.timestamp)}</span>
+                                    </div>
+                                    <span className="text-xs text-indigo-300">Click row again to collapse</span>
+                                  </div>
+
+                                  {/* Payloads Grid */}
+                                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                    {/* Incoming Request Payload */}
+                                    <div className="flex flex-col bg-slate-950/90 rounded-xl overflow-hidden border border-slate-800 shadow-inner">
+                                      <div className="flex items-center justify-between px-3.5 py-2.5 bg-slate-900/90 border-b border-slate-800">
+                                        <div className="flex items-center gap-2">
+                                          <span className="w-2 h-2 rounded-full bg-sky-400"></span>
+                                          <span className="text-[11px] font-semibold text-slate-200 uppercase tracking-wider font-mono">Incoming Request Payload (JSON)</span>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const text = formatPayload(log.payload_input);
+                                            navigator.clipboard.writeText(text);
+                                            setCopiedLogField(`in_${log.id}`);
+                                            setTimeout(() => setCopiedLogField(null), 2000);
+                                          }}
+                                          className="flex items-center gap-1 text-[11px] text-slate-400 hover:text-white px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 transition cursor-pointer"
+                                        >
+                                          {copiedLogField === `in_${log.id}` ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                                          <span>{copiedLogField === `in_${log.id}` ? 'Copied' : 'Copy'}</span>
+                                        </button>
+                                      </div>
+                                      <div className="p-3.5 max-h-80 overflow-y-auto">
+                                        <pre className="text-xs font-mono text-sky-200 whitespace-pre-wrap break-all leading-relaxed">
+                                          {formatPayload(log.payload_input) || '(empty request payload)'}
+                                        </pre>
+                                      </div>
+                                    </div>
+
+                                    {/* Execution Output / Response */}
+                                    <div className="flex flex-col bg-slate-950/90 rounded-xl overflow-hidden border border-slate-800 shadow-inner">
+                                      <div className="flex items-center justify-between px-3.5 py-2.5 bg-slate-900/90 border-b border-slate-800">
+                                        <div className="flex items-center gap-2">
+                                          <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                                          <span className="text-[11px] font-semibold text-slate-200 uppercase tracking-wider font-mono">Execution Output / Response (JSON)</span>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const text = formatPayload(log.payload_output);
+                                            navigator.clipboard.writeText(text);
+                                            setCopiedLogField(`out_${log.id}`);
+                                            setTimeout(() => setCopiedLogField(null), 2000);
+                                          }}
+                                          className="flex items-center gap-1 text-[11px] text-slate-400 hover:text-white px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 transition cursor-pointer"
+                                        >
+                                          {copiedLogField === `out_${log.id}` ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                                          <span>{copiedLogField === `out_${log.id}` ? 'Copied' : 'Copy'}</span>
+                                        </button>
+                                      </div>
+                                      <div className="p-3.5 max-h-80 overflow-y-auto">
+                                        <pre className="text-xs font-mono text-emerald-300 whitespace-pre-wrap break-all leading-relaxed">
+                                          {formatPayload(log.payload_output) || '(no output returned)'}
+                                        </pre>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  {/* Error message block if present */}
+                                  {log.error_message && log.error_message.trim() !== '' && (
+                                    <div className="bg-rose-950/50 border border-rose-900/80 rounded-xl p-3.5">
+                                      <div className="flex items-center justify-between pb-2 mb-2 border-b border-rose-900/60">
+                                        <div className="flex items-center gap-1.5 text-rose-300 font-bold text-[11px] uppercase tracking-wider font-mono">
+                                          <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+                                          <span>Error Trace / Details</span>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            navigator.clipboard.writeText(log.error_message);
+                                            setCopiedLogField(`err_${log.id}`);
+                                            setTimeout(() => setCopiedLogField(null), 2000);
+                                          }}
+                                          className="flex items-center gap-1 text-[11px] text-rose-300 hover:text-white px-2 py-0.5 rounded bg-rose-900/50 hover:bg-rose-900 transition cursor-pointer"
+                                        >
+                                          {copiedLogField === `err_${log.id}` ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                                          <span>{copiedLogField === `err_${log.id}` ? 'Copied' : 'Copy'}</span>
+                                        </button>
+                                      </div>
+                                      <pre className="text-xs font-mono text-rose-200 whitespace-pre-wrap break-all leading-relaxed max-h-60 overflow-y-auto">
+                                        {log.error_message}
+                                      </pre>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -1598,6 +1938,20 @@ export default function App() {
               </div>
             </div>
           </div>
+        )}
+
+        {/* Tab 6: Deep Observability & Metrics */}
+        {activeTab === 'observability' && (
+          <ObservabilityView
+            token={token}
+            initialFunctionId={selectedObsFn}
+            onSelectFunctionToInvoke={(name) => {
+              selectedFnRef.current = name;
+              setSelectedFn(name);
+              setInvokePayload(getSamplePayload(name));
+              setActiveTab('invoke');
+            }}
+          />
         )}
       </main>
 
