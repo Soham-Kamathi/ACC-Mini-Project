@@ -14,11 +14,12 @@ A self-hosted **Function-as-a-Service (FaaS)** execution platform that allows de
    - On-demand cold-start provisioning when invocations arrive.
 5. **Cold vs. Warm Latency Telemetry**: Real-time breakdown of container startup latency vs. function execution time.
 6. **Kubernetes Orchestration**: Programmatic Deployment, ClusterIP Service, and Pod management with CPU/memory limits (`256Mi`, `500m`), security context (`runAsNonRoot=True`), and readiness probes (`/healthz`).
-7. **Observability**: Prometheus metrics exporter (`/api/v1/metrics`) tracking invocations, cold starts, and latency percentiles.
-8. **Interactive Web Dashboard**: Modern React + Vite UI with dynamic integration code samples, live cold-start metrics, and cluster telemetry.
+7. **Platform-Wide & Per-Function Observability**: Prometheus metrics exporter (`/api/v1/metrics`) and deep telemetry subsystem (`/api/v1/observability/*`) with dynamic time-series charts (p50/p95/p99 latency, invocation rate, error rate), autoscaling history, pod readiness & restarts, and request/response JSON payload inspection.
+8. **Interactive Web Dashboard**: Modern React + Vite UI with dynamic integration code samples, live cold-start metrics, dedicated Observability center, and cluster telemetry.
 9. **Public Invocations & Scoped API Keys**: Stable endpoints (`POST /api/v1/f/{public_id}`) guarded by SHA-256 hashed API keys (`X-API-Key`), rate limiting, version pinning, and payload size verification.
 10. **Public Internet Access via Tunnels**: Built-in support for Ngrok/Cloudflare tunnels with permanent domains, allowing any external device or webhook to invoke functions.
-11. **Scientific Evaluation Suite**: Automated benchmarking scripts for Cold Start (Exp 1), Concurrency & Throughput (Exp 2), and Replica Scaling (Exp 3).
+11. **Scientific Evaluation & Autoscaling Demonstration**: Automated benchmarking scripts for Cold Start (Exp 1), Concurrency (Exp 2), Replica Scaling (Exp 3), and live burst autoscale demonstration (`run-autoscale-demo.bat`).
+12. **LeetCode Demo Integration**: Production-style algorithm judge (`Leet-Code-Demo/`) running student Python submissions isolated within MicroFaaS container Pods.
 
 ---
 

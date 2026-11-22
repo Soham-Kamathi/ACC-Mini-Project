@@ -22,11 +22,17 @@ if (-not (Test-Path "$WorkspaceRoot\.env")) {
     Write-Host "[1/6] Configuration file .env found." -ForegroundColor Green
 }
 
+$NgrokAuthToken = ""
 # Read NGROK settings from .env if not passed
-if (-not $NgrokDomain) {
+if (Test-Path "$WorkspaceRoot\.env") {
     Get-Content "$WorkspaceRoot\.env" | ForEach-Object {
-        if ($_ -match "^NGROK_DOMAIN=(.+)$") {
-            $NgrokDomain = $matches[1].Trim()
+        if ($_ -match "^\s*NGROK_DOMAIN\s*=\s*(.+)$") {
+            if (-not $NgrokDomain) {
+                $NgrokDomain = $matches[1].Trim()
+            }
+        }
+        if ($_ -match "^\s*NGROK_AUTHTOKEN\s*=\s*(.+)$") {
+            $NgrokAuthToken = $matches[1].Trim()
         }
     }
 }
@@ -57,7 +63,9 @@ Write-Host "  -> Supporting containers running." -ForegroundColor Green
 # 4. Backend Dependencies & Launcher
 Write-Host "[4/6] Starting FastAPI Backend on http://localhost:8000..." -ForegroundColor Yellow
 $PythonCmd = "python"
-if (Test-Path "$WorkspaceRoot\venv\Scripts\python.exe") {
+if (Test-Path "$WorkspaceRoot\.venv\Scripts\python.exe") {
+    $PythonCmd = "$WorkspaceRoot\.venv\Scripts\python.exe"
+} elseif (Test-Path "$WorkspaceRoot\venv\Scripts\python.exe") {
     $PythonCmd = "$WorkspaceRoot\venv\Scripts\python.exe"
 }
 
@@ -77,11 +85,27 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$WorkspaceRoo
 # 6. Public Tunneling (Optional / Automatic if configured)
 if ($Tunnel -or $NgrokDomain) {
     Write-Host "[6/6] Launching Ngrok tunnel..." -ForegroundColor Yellow
+    $NgrokBin = "ngrok"
+    if (Test-Path "$WorkspaceRoot\ngrok.exe") {
+        $NgrokBin = "$WorkspaceRoot\ngrok.exe"
+    }
+
+    # Automatically apply authtoken if present in .env
+    if ($NgrokAuthToken) {
+        Write-Host "  -> Applying Ngrok authtoken from .env..." -ForegroundColor Green
+        try {
+            & $NgrokBin config add-authtoken $NgrokAuthToken | Out-Null
+        } catch {
+            Write-Host "  -> Note: could not auto-add authtoken via $NgrokBin" -ForegroundColor Gray
+        }
+    }
+
     if ($NgrokDomain) {
-        Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$WorkspaceRoot'; Write-Host '--- Ngrok Public Tunnel ---' -ForegroundColor Magenta; ngrok http 5173 --domain=$NgrokDomain"
+        Write-Host "  -> Forwarding port 5173 to https://$NgrokDomain" -ForegroundColor Green
+        Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$WorkspaceRoot'; Write-Host '--- Ngrok Public Tunnel ---' -ForegroundColor Magenta; & '$NgrokBin' http 5173 --domain=$NgrokDomain"
         $PublicUrl = "https://$NgrokDomain"
     } else {
-        Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$WorkspaceRoot'; Write-Host '--- Ngrok Public Tunnel ---' -ForegroundColor Magenta; ngrok http 5173"
+        Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$WorkspaceRoot'; Write-Host '--- Ngrok Public Tunnel ---' -ForegroundColor Magenta; & '$NgrokBin' http 5173"
         $PublicUrl = "Active (Check Ngrok window for URL)"
     }
 } else {

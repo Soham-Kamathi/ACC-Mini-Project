@@ -94,6 +94,14 @@ Where data lives: users, functions, version source code, API key hashes and invo
 - `backend/tests/conftest.py` makes every test hermetic (no Docker or Kubernetes needed). `pytest.ini` added.
 - Database migration: existing databases gain the new columns (`executed_on`, `public_id`) and a unique index on startup. Verified against a copy of the real database (21 existing functions backfilled).
 
+### 2.3 Observability, Autoscaling Enhancements & LeetCode Integration (Recent)
+- [x] **Platform-Wide & Per-Function Observability System**: Dedicated Observability dashboard with Platform Overview and Per-Function Deep View, dynamic latency/error/traffic time-series charts, autoscaling timeline, pod health gauges, version history, and interactive telemetry history with JSON request/response inspection drawers.
+- [x] **Timezone-Aware UTC Serialization**: Endpoints and frontend formatters normalize timestamps to UTC and display in the user's local timezone (IST).
+- [x] **Real-Time Active Pod Metric Tracking**: Autoscaler and metrics endpoints report live pod counts dynamically during autoscaling bursts instead of static function counts.
+- [x] **Autoscale Live Demonstration**: `demo_autoscale_fibonacci.py` and `run-autoscale-demo.bat` to demonstrate concurrent burst scaling from 0 to 3+ pods.
+- [x] **Secure Subprocess Code Execution Runtime**: `code_executor_handler.py` runtime template for isolated Python execution in Pods with timeout and resource guards.
+- [x] **Standalone LeetCode Demo**: Full-featured algorithm practice app in `Leet-Code-Demo/` connected to MicroFaaS via scoped API keys.
+
 ---
 
 ## 3. Verified end to end on the local cluster

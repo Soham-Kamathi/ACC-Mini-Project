@@ -21,26 +21,15 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Optional, Set, Tuple
-from prometheus_client import Counter, Gauge
 from backend.app.core.config import settings
 from backend.app.core.db import SessionLocal
 from backend.app.models.function import Function
 from backend.app.services.k8s_client import k8s_service
-
-SCALE_EVENTS = Counter(
-    "faas_scale_events_total",
-    "Autoscaler scale operations",
-    ["function_name", "direction"]
-)
-INFLIGHT_REQUESTS = Gauge(
-    "faas_inflight_peak_requests",
-    "Peak requests in flight seen by the autoscaler in its last interval (summed over a function's versions)",
-    ["function_name"]
-)
-DESIRED_REPLICAS = Gauge(
-    "faas_desired_replicas",
-    "Replicas the autoscaler last requested for a function (summed over its versions)",
-    ["function_name"]
+from backend.app.services.telemetry import (
+    FAAS_SCALE_EVENTS_TOTAL as SCALE_EVENTS,
+    FAAS_INFLIGHT_PEAK as INFLIGHT_REQUESTS,
+    FAAS_DESIRED_REPLICAS as DESIRED_REPLICAS,
+    record_scaling_event
 )
 
 @dataclass
@@ -93,6 +82,11 @@ class Autoscaler:
     def last_peak(self, function_id: int) -> int:
         """Demand (peak in-flight requests) seen at the last tick, summed over the function's versions."""
         return sum(self._last_peak.get(r, 0) for r in self.tracked_resources(function_id))
+
+    def get_current_replicas(self, function_id: int) -> Optional[int]:
+        """Return the current replica count tracked by the autoscaler for this function, if any."""
+        replicas = [st.current for st in self._state.values() if st.function_id == function_id and st.current is not None]
+        return sum(replicas) if replicas else None
 
     # ---- called from the controller loop ----
 
@@ -158,8 +152,10 @@ class Autoscaler:
             direction = "up" if new > st.current else "down"
             print(f"[Autoscaler] {resource}: {st.current} -> {new} replicas (peak in-flight={peak}, target={target})")
             if await asyncio.to_thread(k8s_service.scale_deployment, resource, new):
+                old_replicas = st.current or 0
                 st.current = new
                 SCALE_EVENTS.labels(function_name=name, direction=direction).inc()
+                record_scaling_event(None, st.function_id, name, old_replicas, new, direction.upper(), f"Autoscaler peak in-flight={peak}, target={target}")
                 changed.add(st.function_id)
 
         if changed:

@@ -8,6 +8,7 @@ from backend.app.services.k8s_client import k8s_service
 from backend.app.services.naming import function_key
 from backend.app.services.router import mark_cold
 from backend.app.services.autoscaler import autoscaler
+from backend.app.services.telemetry import record_scaling_event
 
 class FaasController:
     def __init__(self):
@@ -71,10 +72,12 @@ class FaasController:
                     scaled = k8s_service.scale_function(function_key(fn.owner_id, fn.name), 0)
 
                     if scaled is not False:
+                        old_rep = fn.active_replicas
                         mark_cold(fn.id)
                         fn.active_replicas = 0
                         fn.status = "SCALED_TO_ZERO"
                         fn.status_message = f"Scaled to 0 replicas due to inactivity (idle > {settings.IDLE_TIMEOUT_SECONDS}s)"
+                        record_scaling_event(db, fn.id, fn.name, old_rep, 0, "DOWN", f"Idle timeout (> {settings.IDLE_TIMEOUT_SECONDS}s)")
                         db.commit()
                         print(f"[FaasController] Function '{fn.name}' is now SCALED_TO_ZERO.")
         finally:

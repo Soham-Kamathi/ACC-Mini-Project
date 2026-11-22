@@ -13,6 +13,11 @@ from backend.app.services.router import invalidate_router_cache, mark_warm, mark
 from backend.app.services.autoscaler import autoscaler
 from backend.app.services.naming import function_key, resource_name
 from backend.app.core.config import settings
+from backend.app.services.telemetry import (
+    FAAS_BUILD_DURATION,
+    FAAS_DEPLOYMENT_DURATION,
+    record_scaling_event
+)
 
 def _image_tag(username: str, function_name: str, version_tag: str) -> str:
     return f"{settings.DOCKER_REGISTRY}/{username}/{function_name}:{version_tag}".lower()
@@ -33,6 +38,7 @@ def _build_and_deploy_task(function_id: int, owner_id: int, username: str, funct
         db.commit()
 
         # 1. Build image
+        t_build_start = time.perf_counter()
         image_tag = builder_service.build_function_image(
             username=username,
             function_name=function_name,
@@ -41,8 +47,11 @@ def _build_and_deploy_task(function_id: int, owner_id: int, username: str, funct
             requirements=requirements,
             runtime=runtime
         )
+        build_duration_ms = (time.perf_counter() - t_build_start) * 1000.0
+        FAAS_BUILD_DURATION.labels(function_name=function_name).observe(build_duration_ms / 1000.0)
 
         # 2. Deploy to Kubernetes
+        t_deploy_start = time.perf_counter()
         k8s_service.deploy_function(
             resource=resource_name(owner_id, function_name, version_tag),
             function_key=function_key(owner_id, function_name),
@@ -59,6 +68,9 @@ def _build_and_deploy_task(function_id: int, owner_id: int, username: str, funct
         if not k8s_service.wait_for_ready_pod(resource, 120):
             raise RuntimeError("Pod did not become ready within 120s (image pull or crash loop?)")
 
+        deploy_duration_ms = (time.perf_counter() - t_deploy_start) * 1000.0
+        FAAS_DEPLOYMENT_DURATION.labels(function_name=function_name).observe(deploy_duration_ms / 1000.0)
+
         # The version only becomes routable once its Deployment exists
         version = db.query(FunctionVersion).filter(
             FunctionVersion.function_id == function_id,
@@ -66,15 +78,29 @@ def _build_and_deploy_task(function_id: int, owner_id: int, username: str, funct
         ).first()
         if version:
             version.is_active = True
+            version.build_duration_ms = round(build_duration_ms, 2)
+            version.deploy_duration_ms = round(deploy_duration_ms, 2)
+            version.status = "READY"
+            version.status_message = "Ready for invocations"
         fn.status = "READY"
         fn.active_replicas = max(1, min_replicas)
         fn.status_message = f"Version {version_tag} is deployed and ready for invocations."
+        record_scaling_event(db, function_id, function_name, 0, max(1, min_replicas), "UP", f"Deployment rollout ({version_tag})")
         db.commit()
         mark_warm(function_id, version_tag)  # deployed with max(1, min_replicas) replicas
         autoscaler.track(function_id, resource, current=max(1, min_replicas))
         invalidate_router_cache(function_id)
     except Exception as e:
         print(f"[Build Error] Failed to build/deploy {function_name}: {e}")
+        ver = db.query(FunctionVersion).filter(
+            FunctionVersion.function_id == function_id,
+            FunctionVersion.version_tag == version_tag
+        ).first()
+        if ver:
+            ver.status = "FAILED"
+            ver.status_message = str(e)
+            ver.is_active = False
+
         fn = db.query(Function).filter(Function.id == function_id).first()
         if fn:
             has_ready_version = db.query(FunctionVersion).filter(
@@ -180,6 +206,10 @@ def list_functions(
     db: Session = Depends(get_db)
 ):
     functions = db.query(Function).filter(Function.owner_id == user_id).all()
+    for fn in functions:
+        auto_rep = autoscaler.get_current_replicas(fn.id)
+        if auto_rep is not None and fn.active_replicas != auto_rep:
+            fn.active_replicas = auto_rep
     return [FunctionOut.model_validate(fn) for fn in functions]
 
 @router.get("/{name}", response_model=FunctionDetailOut)
@@ -194,6 +224,9 @@ def get_function(
     ).first()
     if not fn:
         raise HTTPException(status_code=404, detail=f"Function '{name}' not found.")
+    auto_rep = autoscaler.get_current_replicas(fn.id)
+    if auto_rep is not None and fn.active_replicas != auto_rep:
+        fn.active_replicas = auto_rep
     return FunctionDetailOut.model_validate(fn)
 
 @router.put("/{name}", response_model=FunctionDetailOut)

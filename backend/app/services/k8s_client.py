@@ -378,4 +378,192 @@ class K8sService:
             ok = False
         return ok
 
+    def get_pod_metrics(self, function_key: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Retrieves real-time Pod metrics, readiness, restarts, OOM kills, and container
+        resource utilization (CPU/Memory) for a specific function or all functions in the namespace.
+        """
+        default_res = {
+            "k8s_available": self.k8s_available,
+            "metrics_server_available": False,
+            "pod_count": 0,
+            "ready_count": 0,
+            "restarts_total": 0,
+            "oom_kills_total": 0,
+            "cpu_usage_millicores": 0.0,
+            "cpu_limit_millicores": 0.0,
+            "cpu_utilization_pct": 0.0,
+            "memory_usage_mb": 0.0,
+            "memory_limit_mb": 0.0,
+            "memory_utilization_pct": 0.0,
+            "peak_memory_mb": 0.0,
+            "pods": []
+        }
+
+        if not self.k8s_available:
+            return default_res
+
+        namespace = settings.K8S_NAMESPACE
+        selector = f"faas-function={function_key}" if function_key else "app"
+
+        try:
+            pod_list = self.core_v1.list_namespaced_pod(namespace=namespace, label_selector=selector)
+        except Exception as e:
+            print(f"[K8sService Warning] list_namespaced_pod error: {e}")
+            return default_res
+
+        pods_info = []
+        total_restarts = 0
+        total_oom_kills = 0
+        ready_count = 0
+        cpu_limit_total = 0.0
+        memory_limit_total = 0.0
+
+        for pod in pod_list.items:
+            p_name = pod.metadata.name
+            p_phase = pod.status.phase if pod.status else "Unknown"
+            p_ip = pod.status.pod_ip if pod.status else None
+            p_node = pod.spec.node_name if pod.spec else None
+            p_created = pod.metadata.creation_timestamp.isoformat() if pod.metadata.creation_timestamp else None
+
+            # Ready condition & restarts
+            is_ready = False
+            restarts = 0
+            is_oom = False
+            if pod.status and pod.status.container_statuses:
+                is_ready = all(c.ready for c in pod.status.container_statuses)
+                restarts = sum(c.restart_count for c in pod.status.container_statuses)
+                for c in pod.status.container_statuses:
+                    if c.last_state and c.last_state.terminated:
+                        if c.last_state.terminated.reason == "OOMKilled" or c.last_state.terminated.exit_code == 137:
+                            is_oom = True
+
+            if is_ready:
+                ready_count += 1
+            total_restarts += restarts
+            if is_oom:
+                total_oom_kills += 1
+
+            # Configured limits from spec
+            c_cpu_lim = 0.0
+            c_mem_lim = 0.0
+            if pod.spec and pod.spec.containers:
+                res = pod.spec.containers[0].resources
+                if res and res.limits:
+                    c_cpu_lim = _parse_cpu_millicores(res.limits.get("cpu", "500m"))
+                    c_mem_lim = _parse_memory_mb(res.limits.get("memory", "256Mi"))
+
+            cpu_limit_total += c_cpu_lim
+            memory_limit_total += c_mem_lim
+
+            pods_info.append({
+                "name": p_name,
+                "phase": p_phase,
+                "ready": is_ready,
+                "restarts": restarts,
+                "oom_killed": is_oom,
+                "ip": p_ip,
+                "node": p_node,
+                "created_at": p_created,
+                "cpu_limit_millicores": c_cpu_lim,
+                "memory_limit_mb": c_mem_lim,
+                "cpu_usage_millicores": 0.0,
+                "memory_usage_mb": 0.0
+            })
+
+        # Try to query Metrics API (metrics.k8s.io) for live container resource usage
+        metrics_server_ok = False
+        cpu_usage_total = 0.0
+        memory_usage_total = 0.0
+        peak_memory = 0.0
+
+        try:
+            custom_api = client.CustomObjectsApi(api_client=self.core_v1.api_client)
+            metrics_obj = custom_api.list_namespaced_custom_object(
+                group="metrics.k8s.io",
+                version="v1beta1",
+                namespace=namespace,
+                plural="pods"
+            )
+            if metrics_obj and "items" in metrics_obj:
+                metrics_server_ok = True
+                pod_metrics_map = {}
+                for item in metrics_obj["items"]:
+                    m_pname = item.get("metadata", {}).get("name")
+                    m_cpu = 0.0
+                    m_mem = 0.0
+                    for c in item.get("containers", []):
+                        m_cpu += _parse_cpu_millicores(c.get("usage", {}).get("cpu", "0"))
+                        m_mem += _parse_memory_mb(c.get("usage", {}).get("memory", "0"))
+                    pod_metrics_map[m_pname] = (m_cpu, m_mem)
+
+                for p in pods_info:
+                    if p["name"] in pod_metrics_map:
+                        u_cpu, u_mem = pod_metrics_map[p["name"]]
+                        p["cpu_usage_millicores"] = round(u_cpu, 2)
+                        p["memory_usage_mb"] = round(u_mem, 2)
+                        cpu_usage_total += u_cpu
+                        memory_usage_total += u_mem
+                        if u_mem > peak_memory:
+                            peak_memory = u_mem
+        except Exception:
+            # Metrics server not installed or permissions restricted
+            metrics_server_ok = False
+
+        cpu_util_pct = (cpu_usage_total / cpu_limit_total * 100.0) if cpu_limit_total > 0 else 0.0
+        mem_util_pct = (memory_usage_total / memory_limit_total * 100.0) if memory_limit_total > 0 else 0.0
+
+        return {
+            "k8s_available": True,
+            "metrics_server_available": metrics_server_ok,
+            "pod_count": len(pods_info),
+            "ready_count": ready_count,
+            "restarts_total": total_restarts,
+            "oom_kills_total": total_oom_kills,
+            "cpu_usage_millicores": round(cpu_usage_total, 2),
+            "cpu_limit_millicores": round(cpu_limit_total, 2),
+            "cpu_utilization_pct": round(cpu_util_pct, 1),
+            "memory_usage_mb": round(memory_usage_total, 2),
+            "memory_limit_mb": round(memory_limit_total, 2),
+            "memory_utilization_pct": round(mem_util_pct, 1),
+            "peak_memory_mb": round(peak_memory, 2),
+            "pods": pods_info
+        }
+
+def _parse_cpu_millicores(cpu_val: Any) -> float:
+    if not cpu_val:
+        return 0.0
+    s = str(cpu_val).strip().lower()
+    if s.endswith("n"):
+        return float(s[:-1]) / 1_000_000.0
+    if s.endswith("u"):
+        return float(s[:-1]) / 1_000.0
+    if s.endswith("m"):
+        return float(s[:-1])
+    try:
+        return float(s) * 1000.0
+    except (ValueError, TypeError):
+        return 0.0
+
+def _parse_memory_mb(mem_val: Any) -> float:
+    if not mem_val:
+        return 0.0
+    s = str(mem_val).strip()
+    if s.endswith("Ki") or s.endswith("ki"):
+        return float(s[:-2]) / 1024.0
+    if s.endswith("Mi") or s.endswith("mi"):
+        return float(s[:-2])
+    if s.endswith("Gi") or s.endswith("gi"):
+        return float(s[:-2]) * 1024.0
+    if s.endswith("k") or s.endswith("K"):
+        return float(s[:-1]) / (1024.0 * 1.024)
+    if s.endswith("m") or s.endswith("M"):
+        return float(s[:-1])
+    if s.endswith("g") or s.endswith("G"):
+        return float(s[:-1]) * 1000.0 / 1.024
+    try:
+        return float(s) / (1024.0 * 1024.0)
+    except (ValueError, TypeError):
+        return 0.0
+
 k8s_service = K8sService()
